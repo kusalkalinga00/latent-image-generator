@@ -167,11 +167,20 @@ def check_env() -> str:
         "cuda_available_on_cpu_container": bool(torch.cuda.is_available()),
     }
 
-    try:
-        from transformers import AutoProcessor
+    # subfolder="processor" is required, and getting that wrong produces a
+    # *false alarm* rather than a miss: this repo keeps every component in its own
+    # subfolder and has no root-level processing class, so
+    # AutoProcessor.from_pretrained(MODEL_ID) reports "Unrecognized processing
+    # class in Qwen/Qwen-Image-Edit-2511" against a perfectly good model. A check
+    # that cries wolf is worse than no check, so the subfolder is asserted against
+    # model_index.json's declared component, `Qwen2VLProcessor` - which is also the
+    # class that needs torchvision and started all this.
+    from transformers import AutoProcessor
 
-        processor = AutoProcessor.from_pretrained(MODEL_ID)
+    try:
+        processor = AutoProcessor.from_pretrained(MODEL_ID, subfolder="processor")
         info["processor"] = type(processor).__name__
+        info["processor_is_qwen2vl"] = type(processor).__name__.startswith("Qwen2VL")
         info["processor_ok"] = True
     except Exception as exc:
         info["processor"] = f"{type(exc).__name__}: {exc}"
