@@ -147,6 +147,33 @@ curl -X POST "$IMAGE_EDITOR_API_URL" \
 
 Returns `{"ok": true, "image_b64": "...", "seconds": 41.2, ...}`.
 
+## Troubleshooting
+
+Things that cost real time here, recorded so they cost it once.
+
+**A fix appears not to work.** `modal.Cls.from_name` resolves the **deployed**
+app, not your local file. So after changing the image or the `Editor` class you
+must `modal deploy` before a local `modal run ...::smoke` can see the change.
+Skipping that made a correct torchvision fix look like a broken model, and the
+deployed container crash-looped on the old image the whole time.
+
+**`ImportError: Qwen2VLVideoProcessor requires the Torchvision library`.** Add
+`torchvision` to the image. Nothing at import time asks for it — the processor
+pulls it in lazily at load — so the image builds clean and fails only on the GPU.
+
+**`Unrecognized processing class in Qwen/Qwen-Image-Edit-2511`.** The model is
+fine. Every component lives in a subfolder, so the processor needs
+`subfolder="processor"`.
+
+**`DeserializationError: the 'torch' module is not available`.** A Function
+returned something carrying a torch-defined class (version strings are a common
+trap), and Modal unpickles return values *locally*, where torch does not exist.
+Coerce to plain `str`/`bool`, or return JSON.
+
+**A cold start is slower than a model this size should be.** Check the container
+is not crash-looping before optimising anything — repeated failed starts look
+exactly like slowness from the outside and bill for every attempt.
+
 ## Layout
 
 ```
