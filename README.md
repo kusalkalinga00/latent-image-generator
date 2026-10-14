@@ -129,9 +129,11 @@ uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_env
 # 4. pull the weights into the Volume, once (~57.7 GB, 2-5 min, storage is free)
 uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights
 
-# 5. a password for the Gradio UI — the UI refuses to serve without it
-modal secret create image-editor-auth \
-  GRADIO_USER=you GRADIO_PASSWORD=$(openssl rand -base64 24)
+# 5. a password for the Gradio UI — the UI refuses to serve without it.
+#    Generate it where you can READ it: Modal secrets are write-only, so a
+#    password generated straight into the secret can never be recovered.
+PW=$(openssl rand -base64 24 | tr -d '\n'); echo "your UI password: $PW"
+modal secret create image-editor-auth GRADIO_USER=you GRADIO_PASSWORD="$PW"
 
 # 6. deploy
 uv run --package modal-app modal deploy modal_app/src/modal_app/app.py

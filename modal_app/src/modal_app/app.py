@@ -116,8 +116,9 @@ def _ui_secrets() -> list[modal.Secret]:
     print(
         f"[image-editor] secret {AUTH_SECRET_NAME!r} not found. The Gradio UI will serve\n"
         f"[image-editor] a setup page instead of an editor until you create it:\n"
+        f"[image-editor]     PW=$(openssl rand -base64 24 | tr -d '\\n'); echo \"password: $PW\"\n"
         f"[image-editor]     modal secret create {AUTH_SECRET_NAME} "
-        "GRADIO_USER=you GRADIO_PASSWORD=$(openssl rand -base64 24)"
+        'GRADIO_USER=you GRADIO_PASSWORD="$PW"' 
     )
     return []
 
@@ -457,9 +458,12 @@ def _misconfigured_app() -> Any:
             "<h2>image-editor is not configured yet</h2>"
             "<p>The Gradio UI needs a password before it will serve, so that an "
             "H100-backed endpoint is never open to the internet.</p>"
-            f"<p>Create the secret, then redeploy:</p>"
-            f"<pre>modal secret create {AUTH_SECRET_NAME} "
-            "GRADIO_USER=you GRADIO_PASSWORD=$(openssl rand -base64 24)</pre>"
+            "<p>Create the secret, then redeploy. Generate the password "
+            "somewhere you can read it first &mdash; Modal secrets are write-only, "
+            "so a password generated straight into the secret cannot be recovered:</p>"
+            "<pre>PW=$(openssl rand -base64 24 | tr -d '\\n'); echo \"password: $PW\"\n"
+            f"modal secret create {AUTH_SECRET_NAME} "
+            'GRADIO_USER=you GRADIO_PASSWORD="$PW"</pre>'
             "</body></html>"
         )
 
