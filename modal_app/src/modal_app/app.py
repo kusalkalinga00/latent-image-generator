@@ -183,6 +183,33 @@ def download_weights() -> dict[str, Any]:
     }
 
 
+@app.function(image=gpu_image, volumes={"/models": weights}, timeout=900, cpu=2)
+def volume_stats() -> str:
+    """Report what is actually in the Volume. Measured, not assumed.
+
+    `modal run` does not echo a Function's return value, so a size reported only
+    through the return path is invisible. Returns JSON and prints it.
+    """
+    import json
+    import os
+
+    files = 0
+    total = 0
+    for root, _dirs, names in os.walk(MODEL_CACHE):
+        for name in names:
+            path = os.path.join(root, name)
+            # HF caches store real bytes in blobs/ and link them into snapshots/;
+            # counting symlinks too would roughly double the reported size.
+            if os.path.islink(path):
+                continue
+            files += 1
+            total += os.path.getsize(path)
+
+    info = {"files": files, "bytes": total, "gib": round(total / 1024**3, 2)}
+    print("[image-editor] volume: " + json.dumps(info))
+    return json.dumps(info)
+
+
 # --------------------------------------------------------------------------- #
 # The model
 # --------------------------------------------------------------------------- #
