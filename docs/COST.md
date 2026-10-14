@@ -65,11 +65,39 @@ preference here, it is the only configuration that fits the budget.**
 
 ## What it costs per edit
 
-*(measured — see below)*
+Measured on an H100 with `inputs/ref.png` (896×1184, 40 steps):
 
-The gap between *model time* and *wall time* is the cold start: loading 57.7 GB
-into VRAM plus interpreter startup. It is paid once per container, not per edit,
-so a burst of edits in one session amortises it.
+| Phase | Measured |
+|---|---|
+| Container boot | ~1–2 s (Modal's claim; not separately instrumented) |
+| Load 53.76 GiB of weights into VRAM | **28.6 s** |
+| 40-step edit at 896×1184 | **33.5 s** |
+| **First edit of a session** | **~62 s → $0.068** |
+| **Each further edit while warm** | **~34 s → $0.037** |
+
+At those rates $30/month is roughly:
+
+| Usage pattern | Edits per month |
+|---|---|
+| Every edit a cold start | ~440 |
+| Warm batches of 5 | ~700 |
+| Warm batches of 20 | ~780 |
+
+That is the honest shape of it: **cold starts are about half the cost of a single
+edit**, which is why batching several edits into one sitting roughly halves the
+per-edit price. The load is paid once per container, not once per edit.
+
+The `pipeline on GPU in 28.6s` line is logged on every cold start, so this number
+is checkable rather than remembered.
+
+### The cost of the debugging that got us here
+
+Two failed H100 attempts (a missing `torchvision`, then a crash-loop against a
+stale deployment) plus one successful run. The crash-loop is the one worth
+knowing about: a container that repeatedly fails to start still bills for the
+seconds it runs, so a loop that *looks* like a slow cold start is quietly
+spending money. It was caught and the deployment replaced, but the pattern is
+worth recognising. Exact spend is in the Modal dashboard, not here.
 
 ## Cheaper configurations, if you need more headroom
 

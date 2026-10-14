@@ -56,6 +56,24 @@ The trade is cold-start latency: the first edit after a pause waits while 57.7 G
 loads into VRAM. That is the honest cost of scale-to-zero, and it is the right
 trade at $30/month.
 
+### What it actually costs
+
+Measured on an H100 with a 896×1184 image at 40 steps:
+
+| | Measured | Cost |
+|---|---|---|
+| Load 53.76 GiB into VRAM (once per container) | 28.6 s | $0.031 |
+| A 40-step edit | 33.5 s | $0.037 |
+| **First edit of a session** | ~62 s | **$0.068** |
+| **Each further edit while warm** | ~34 s | **$0.037** |
+
+So $30/month is roughly **440 edits** if every one is a cold start, or **~780** if
+you batch several edits per sitting. Batching roughly halves the per-edit price,
+because the weight load is paid once per container rather than once per edit.
+
+Full detail, including the rates and what would blow the budget, in
+[`docs/COST.md`](docs/COST.md).
+
 ### What was deliberately *not* done
 
 **GPU memory snapshots.** Modal's own docs say snapshots "do not speed up model
