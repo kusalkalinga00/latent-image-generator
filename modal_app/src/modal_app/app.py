@@ -421,17 +421,27 @@ def ui() -> Any:
         )
 
     def run_edit(image, prompt, steps, cfg, seed, progress=gr.Progress()):
-        if image is None:
+        if not image:
             raise gr.Error("Upload an image first.")
         if not (prompt or "").strip():
             raise gr.Error("Describe the edit you want.")
 
-        def encode(im):
+        def encode(item):
+            """Accept either a path (gr.File) or a PIL image (gr.Image).
+
+            Both components are plausible for this UI; accepting either keeps the
+            handler independent of which one is wired in.
+            """
+            if isinstance(item, str):
+                with open(item, "rb") as handle:
+                    return handle.read()
+            if isinstance(item, bytes):
+                return item
             buf = io.BytesIO()
-            im.convert("RGB").save(buf, format="PNG")
+            item.convert("RGB").save(buf, format="PNG")
             return buf.getvalue()
 
-        payload = image if isinstance(image, list) else [image]
+        payload = (image if isinstance(image, list) else [image])[:MAX_IMAGES]
         progress(0.05, desc="Booting the editor (cold start loads 57.7 GB)...")
 
         out = _run_edit([encode(im) for im in payload], prompt, steps, cfg, seed)
@@ -448,10 +458,15 @@ def ui() -> Any:
         )
         with gr.Row():
             with gr.Column():
+                # type="filepath", NOT "pil": gr.File accepts only
+                # ['filepath', 'binary'] - "pil" is gr.Image's parameter. Passing
+                # it raises at component construction, which happens *after* the
+                # auth gate, so the UI crash-looped only once credentials were
+                # configured and the guard stopped short-circuiting.
                 inputs = gr.File(
                     label=f"Reference image(s) - up to {MAX_IMAGES}",
                     file_count="multiple",
-                    type="pil",
+                    type="filepath",
                 )
                 prompt = gr.Textbox(
                     label="Edit instruction",
