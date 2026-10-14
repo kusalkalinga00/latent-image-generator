@@ -31,15 +31,21 @@ export interface EditOutput {
 export const editImage = createServerFn({ method: 'POST' })
   .validator((data: EditInput) => data)
   .handler(async ({ data }): Promise<EditOutput> => {
+    // Named *_PROXY_* deliberately. MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are the
+    // Modal CLI's own auth variables, and these are *proxy* tokens (wk-/ws-) used
+    // only for web-function auth - a different credential type entirely. Sharing
+    // the name means anyone who sources this env file breaks their `modal` CLI
+    // with "Token ID is malformed", which is exactly what happened while building
+    // this. Distinct names, distinct meaning.
     const apiUrl = process.env.IMAGE_EDITOR_API_URL
-    const tokenId = process.env.MODAL_TOKEN_ID
-    const tokenSecret = process.env.MODAL_TOKEN_SECRET
+    const tokenId = process.env.MODAL_PROXY_TOKEN_ID
+    const tokenSecret = process.env.MODAL_PROXY_TOKEN_SECRET
 
     if (!apiUrl || !tokenId || !tokenSecret) {
       const missing = [
         !apiUrl && 'IMAGE_EDITOR_API_URL',
-        !tokenId && 'MODAL_TOKEN_ID',
-        !tokenSecret && 'MODAL_TOKEN_SECRET',
+        !tokenId && 'MODAL_PROXY_TOKEN_ID',
+        !tokenSecret && 'MODAL_PROXY_TOKEN_SECRET',
       ].filter(Boolean)
       return {
         ok: false,

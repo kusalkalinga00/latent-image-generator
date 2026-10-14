@@ -99,9 +99,14 @@ pnpm dev                  # http://localhost:3000
 
 ```
 IMAGE_EDITOR_API_URL=https://<workspace>--image-editor-api.modal.run
-MODAL_TOKEN_ID=wk-...
-MODAL_TOKEN_SECRET=ws-...
+MODAL_PROXY_TOKEN_ID=wk-...
+MODAL_PROXY_TOKEN_SECRET=ws-...
 ```
+
+The names matter. `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` are the Modal CLI's own
+auth variables; these are **proxy** tokens (`wk-`/`ws-`) for web-function auth only.
+Exporting a proxy token under the CLI's names breaks the CLI with "Token ID is
+malformed" - learned the hard way.
 
 **No `VITE_` prefix.** TanStack Start inlines `VITE_`-prefixed values into browser code, which
 would hand the credential to every visitor. These three are read only inside the server
