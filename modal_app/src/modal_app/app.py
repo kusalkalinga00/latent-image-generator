@@ -1,41 +1,50 @@
-"""Modal app hosting Qwen/Qwen-Image-Edit-2511 for personal use.
+"""Modal GPU backend for Qwen-Image-Edit-2511, running the 4-step Lightning LoRA.
 
-Everything here runs in Modal's cloud. No model weights ever touch the local
-machine: the 57.7 GB checkpoint is pulled once into a Modal Volume and every
-container after that reads it from there.
+This is the **model service only**. The web UI is a separate TanStack Start app on
+Vercel that calls this over HTTPS. That split is deliberate: the browser never
+talks to Modal, so no credential ever needs to reach a client, and this endpoint
+stays behind proxy auth. It is also why there is no Gradio app here any more - a
+UI living inside the GPU service ends up needing its own auth, its own secret, and
+its own failure modes for no benefit.
+
+Everything runs in Modal's cloud. No model weight ever touches a local machine:
+the checkpoint goes into a Modal Volume once and every container after reads it
+from there.
 
 From the repo root:
 
-    # 1. cheap CPU check that the image's dependency set can import the pipeline
+    # cheap CPU check that the dependency set loads the pipeline's front end
     uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_env
 
-    # 2. one-off: pull the weights into the Volume (~57.7 GB, free storage)
+    # one-off: pull the base weights + the 4-step LoRA into the Volume
     uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights
 
-    # 3. deploy the Gradio UI + JSON endpoint
+    # verify the distilled model actually runs, on a real GPU
+    uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke \
+        --prompt "make it snow" --image inputs/ref.png
+
     uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
 
-Cost design, in one paragraph. Modal bills per GPU-second, so the only thing
-that matters is how long an H100 is alive. Three decisions follow from that and
-they are load-bearing:
+Cost design. Billing is per GPU-second, so one thing matters: how long an H100 is
+alive.
 
-  * ``max_containers=1`` - a personal tool must never bill two H100s at once.
-  * ``scaledown_window=60`` - release the GPU a minute after the last edit
-    rather than holding it. Holding one H100 warm for a month costs $2,848.
-  * The Gradio UI runs on a **separate CPU-only** container that calls the GPU
-    class over Modal's internal RPC. This is not tidiness: a browser holding an
-    open Gradio tab would otherwise keep the H100 alive, and an idle H100 is
-    $3.95/hr. On a CPU container the same idle tab costs cents.
+  * ``max_containers=1`` - one GPU at a time whatever the traffic. Not a rate
+    limit; it is what stops a burst of concurrent requests billing N GPUs.
+  * ``scaledown_window=60`` - release the GPU a minute after the last edit.
+    Holding one H100 warm for a month costs $2,848.
+  * **4 steps instead of 40** - the biggest lever by far, and the reason a public
+    app is viable on a $30/month credit. The Lightning LoRA is a distillation of
+    the base model, published by LightX2V and linked from Qwen's own README.
 
-GPU memory snapshots (``enable_gpu_snapshot``) are deliberately NOT used.
-Modal's own docs say snapshots "do not speed up model loading from storage",
-and for a 57.7 GB checkpoint initialization is entirely storage-bound - so the
-snapshot would add overhead and save nothing.
+GPU memory snapshots are deliberately NOT used: Modal's docs state they "do not
+speed up model loading from storage" and may worsen it, and for a 53.76 GiB
+checkpoint initialization is entirely storage-bound.
 """
 
 from __future__ import annotations
 
 import io
+import math
 from typing import Any
 
 import modal
@@ -45,25 +54,19 @@ MODEL_ID = "Qwen/Qwen-Image-Edit-2511"
 VOLUME_NAME = "image-editor-weights"
 MODEL_CACHE = "/models/hf"
 
+# The 4-step distilled LoRA: Apache-2.0, 0.85 GB, published for 2511 specifically
+# (not the 2509 or text-to-image variants, which are different repos).
+LORA_REPO = "lightx2v/Qwen-Image-Edit-2511-Lightning"
+LORA_FILE = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+
 # 2511 accepts multiple reference images; cap it so one call cannot balloon VRAM.
 MAX_IMAGES = 3
 MAX_STEPS = 60
-DEFAULT_STEPS = 40
 
-# Gradio UI credentials live in this Modal Secret, never in the repo.
-AUTH_SECRET_NAME = "image-editor-auth"
-
-# Whether the browser UI requires a password.
-#
-#   "required" (default) - refuses to serve without GRADIO_USER/GRADIO_PASSWORD
-#   "off"                - serves to anyone who has the URL
-#
-# The default is "required" for one reason: this endpoint is on the public
-# internet and every edit spends GPU credit. An open endpoint that someone else
-# finds burns $3.95/hr, and max_containers=1 does not limit that - it limits how
-# many GPUs run at once, not for how long. For a genuinely single-user tool "off"
-# is a defensible choice, so it is one line rather than an argument.
-UI_AUTH_MODE = "required"
+LIGHTNING_STEPS = 4
+STANDARD_STEPS = 40
+DEFAULT_STEPS = LIGHTNING_STEPS
+DEFAULT_CFG = 1.0  # guidance-free, which is how the distilled model was trained
 
 app = modal.App(APP_NAME)
 weights = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -78,14 +81,12 @@ gpu_image = (
     .apt_install("git")
     .uv_pip_install(
         "torch",
-        # Not optional: the pipeline's Qwen2VL video/image processor imports
-        # Torchvision, and without it the model fails to load. It is the wheel
-        # that is easiest to forget because nothing at import time asks for it.
+        # Required, and required invisibly: the pipeline's Qwen2.5-VL processor
+        # imports Torchvision lazily at load time, so the image builds happily
+        # without it and the model then dies on the GPU.
         "torchvision",
-        # Qwen's README says "install the latest diffusers from git". That was
-        # true on release day; 0.41.0 (2026-10-06) ships
-        # QwenImageEditPlusPipeline, so a pinned release works and the build is
-        # reproducible instead of tracking main.
+        # Qwen's README says install diffusers from git. 0.41.0 ships
+        # QwenImageEditPlusPipeline, so a pinned release is reproducible.
         "diffusers==0.41.0",
         "transformers>=4.51.3",  # Qwen2.5-VL support, per Qwen's Quick Start
         "accelerate",
@@ -99,71 +100,53 @@ gpu_image = (
     .env({"HF_HOME": MODEL_CACHE, "HF_HUB_DISABLE_TELEMETRY": "1"})
 )
 
-# The web layer holds no model and needs no torch - a light image keeps its cold
-# start and its idle cost small.
-web_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .uv_pip_install("fastapi[standard]", "gradio", "pillow")
-    .env({"IMAGE_EDITOR_UI_AUTH": UI_AUTH_MODE})
+# The API layer holds no model, so it needs no torch: it decodes JSON, calls the
+# GPU class, and encodes the result. A light image keeps its cold start and its
+# idle cost near zero.
+api_image = modal.Image.debian_slim(python_version="3.12").uv_pip_install(
+    "fastapi[standard]"
 )
 
-
-def _ui_secrets() -> list[modal.Secret]:
-    """Attach the UI password secret if it exists, without requiring it.
-
-    This asks the API what exists rather than calling ``Secret.from_name`` and
-    catching. ``from_name`` is lazy: it hands back an unresolved handle and only
-    fails once Modal materialises it, which is too late to catch here and takes
-    the whole module down with it - including `check_env` and `download_weights`,
-    which need no secret at all. Measured the hard way.
-    """
-    try:
-        existing = {s.name for s in modal.Secret.objects.list()}
-    except Exception as exc:  # offline, or an API change
-        print(f"[image-editor] could not list secrets ({exc}); assuming none.")
-        return []
-
-    if AUTH_SECRET_NAME in existing:
-        return [modal.Secret.from_name(AUTH_SECRET_NAME)]
-
-    print(
-        f"[image-editor] secret {AUTH_SECRET_NAME!r} not found. The Gradio UI will serve\n"
-        f"[image-editor] a setup page instead of an editor until you create it:\n"
-        f"[image-editor]     modal secret create {AUTH_SECRET_NAME} --force "
-        "GRADIO_USER=you GRADIO_PASSWORD=your-chosen-password\n"
-        f"[image-editor] (or opt out entirely with IMAGE_EDITOR_UI_AUTH=off)"
-    )
-    return []
+# The distillation scheduler. This cannot be inferred from the LoRA file - it is a
+# property of how the model was distilled, and loading the LoRA onto the pipeline's
+# *default* scheduler is the mistake the Lightning repo documents as grid
+# artifacts. Lifted from their generate_with_diffusers.py, where the comment reads
+# "We use shift=3 in distillation".
+LIGHTNING_SCHEDULER_CONFIG = {
+    "base_image_seq_len": 256,
+    "base_shift": math.log(3),
+    "invert_sigmas": False,
+    "max_image_seq_len": 8192,
+    "max_shift": math.log(3),
+    "num_train_timesteps": 1000,
+    "shift": 1.0,
+    "shift_terminal": None,
+    "stochastic_sampling": False,
+    "time_shift_type": "exponential",
+    "use_beta_sigmas": False,
+    "use_dynamic_shifting": True,
+    "use_exponential_sigmas": False,
+    "use_karras_sigmas": False,
+}
 
 
 # --------------------------------------------------------------------------- #
-# Setup / verification functions (CPU-only, no GPU billing)
+# Setup / verification (CPU only, no GPU billing)
 # --------------------------------------------------------------------------- #
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=900, cpu=2)
 def check_env() -> str:
-    """Prove the dependency set can load the pipeline's front end, before paying for a GPU.
-
-    An image build is slow and an H100 container is expensive; this runs the risky
-    part of initialization on a CPU container for fractions of a cent.
+    """Prove the dependency set can load the pipeline's front end before paying for a GPU.
 
     It loads the **processor**, not just the modules, and that distinction cost a
-    wasted H100 container to learn. The first version only imported diffusers,
-    transformers and torch and reported everything healthy - while the real load
-    died on
+    wasted H100 container to learn: importing a library does not exercise it, and
+    torchvision was missing from an image that imported everything successfully.
 
-        ImportError: Qwen2VLVideoProcessor requires the Torchvision library
-
-    because the processor pulls torchvision in lazily, at model-load time, on a
-    GPU. Importing a library does not exercise it. The processor is small (config
-    and tokenizer, not the 40 GB transformer) so loading it here is cheap, and the
-    Volume is mounted so it is a cache hit rather than a download.
-
-    Returns a JSON *string*, and coerces every field to a plain str/bool. Modal
-    unpickles the return value in the **local** environment, which has no torch,
-    so handing back anything carrying a torch-defined class fails with a
-    misleading "the 'torch' module is not available in the local environment".
+    Returns a JSON *string* and coerces every field to a plain str/bool. Modal
+    unpickles the return value in the **local** environment, which has no torch, so
+    anything carrying a torch-defined class fails to deserialize with a misleading
+    "the 'torch' module is not available in the local environment".
     """
     import json
 
@@ -177,24 +160,20 @@ def check_env() -> str:
         "torchvision": str(torchvision.__version__),
         "diffusers": str(diffusers.__version__),
         "transformers": str(transformers.__version__),
-        "has_qwen_image_edit_plus": bool(hasattr(diffusers, "QwenImageEditPlusPipeline")),
-        "cuda_available_on_cpu_container": bool(torch.cuda.is_available()),
+        "has_qwen_image_edit_plus": bool(
+            hasattr(diffusers, "QwenImageEditPlusPipeline")
+        ),
     }
 
-    # subfolder="processor" is required, and getting that wrong produces a
-    # *false alarm* rather than a miss: this repo keeps every component in its own
-    # subfolder and has no root-level processing class, so
-    # AutoProcessor.from_pretrained(MODEL_ID) reports "Unrecognized processing
-    # class in Qwen/Qwen-Image-Edit-2511" against a perfectly good model. A check
-    # that cries wolf is worse than no check, so the subfolder is asserted against
-    # model_index.json's declared component, `Qwen2VLProcessor` - which is also the
-    # class that needs torchvision and started all this.
+    # subfolder="processor" is required. This repo keeps every component in its own
+    # subfolder and has no root-level processing class, so a root-level lookup
+    # reports "Unrecognized processing class" against a perfectly healthy model -
+    # a false alarm, which is worse than no check at all.
     from transformers import AutoProcessor
 
     try:
         processor = AutoProcessor.from_pretrained(MODEL_ID, subfolder="processor")
         info["processor"] = type(processor).__name__
-        info["processor_is_qwen2vl"] = type(processor).__name__.startswith("Qwen2VL")
         info["processor_ok"] = True
     except Exception as exc:
         info["processor"] = f"{type(exc).__name__}: {exc}"
@@ -205,42 +184,46 @@ def check_env() -> str:
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=5400, cpu=4)
-def download_weights() -> dict[str, Any]:
-    """Pull the checkpoint into the Volume once. Subsequent boots hit the cache."""
+def download_weights() -> str:
+    """Pull the checkpoint and the LoRA into the Volume, once. Commits, so it persists."""
+    import json
     import os
     import time
 
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
 
     started = time.time()
     path = snapshot_download(MODEL_ID, max_workers=8)
+    lora_path = hf_hub_download(repo_id=LORA_REPO, filename=LORA_FILE)
 
     total = 0
-    for root, _dirs, files in os.walk(MODEL_CACHE):
-        for name in files:
-            fp = os.path.join(root, name)
-            if os.path.isfile(fp) and not os.path.islink(fp):
-                total += os.path.getsize(fp)
+    for root, _dirs, names in os.walk(MODEL_CACHE):
+        for name in names:
+            full = os.path.join(root, name)
+            # An HF cache stores real bytes in blobs/ and links them into
+            # snapshots/; counting symlinks too would roughly double the figure.
+            if os.path.islink(full):
+                continue
+            total += os.path.getsize(full)
 
-    # commit() is what makes the download durable - without it the Volume's
-    # writes vanish when the container exits and every cold start re-downloads.
+    # Without commit() the writes vanish when the container exits, and every cold
+    # start silently re-downloads the whole thing.
     weights.commit()
 
-    return {
-        "path": path,
+    info = {
+        "model_path": path,
+        "lora_path": lora_path,
         "bytes": total,
         "gib": round(total / 1024**3, 2),
         "seconds": round(time.time() - started, 1),
     }
+    print("[image-editor] downloaded: " + json.dumps(info))
+    return json.dumps(info)
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=900, cpu=2)
 def volume_stats() -> str:
-    """Report what is actually in the Volume. Measured, not assumed.
-
-    `modal run` does not echo a Function's return value, so a size reported only
-    through the return path is invisible. Returns JSON and prints it.
-    """
+    """Report what is actually in the Volume. Measured, not assumed."""
     import json
     import os
 
@@ -248,13 +231,11 @@ def volume_stats() -> str:
     total = 0
     for root, _dirs, names in os.walk(MODEL_CACHE):
         for name in names:
-            path = os.path.join(root, name)
-            # HF caches store real bytes in blobs/ and link them into snapshots/;
-            # counting symlinks too would roughly double the reported size.
-            if os.path.islink(path):
+            full = os.path.join(root, name)
+            if os.path.islink(full):
                 continue
             files += 1
-            total += os.path.getsize(path)
+            total += os.path.getsize(full)
 
     info = {"files": files, "bytes": total, "gib": round(total / 1024**3, 2)}
     print("[image-editor] volume: " + json.dumps(info))
@@ -280,16 +261,41 @@ class Editor:
         import time
 
         import torch
-        from diffusers import QwenImageEditPlusPipeline
+        from diffusers import (
+            FlowMatchEulerDiscreteScheduler,
+            QwenImageEditPlusPipeline,
+        )
+        from diffusers.models import QwenImageTransformer2DModel
+        from huggingface_hub import hf_hub_download
 
         started = time.time()
-        self.pipe = QwenImageEditPlusPipeline.from_pretrained(
-            MODEL_ID, torch_dtype=torch.bfloat16
+
+        # Same construction order as the Lightning reference script: build the
+        # transformer, hand the pipeline the distillation scheduler, and attach the
+        # LoRA last. Loading the LoRA onto a default-scheduler pipeline is exactly
+        # the mistake their README documents as grid artifacts.
+        transformer = QwenImageTransformer2DModel.from_pretrained(
+            MODEL_ID, subfolder="transformer", torch_dtype=torch.bfloat16
         )
+        scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            LIGHTNING_SCHEDULER_CONFIG
+        )
+        self.pipe = QwenImageEditPlusPipeline.from_pretrained(
+            MODEL_ID,
+            transformer=transformer,
+            scheduler=scheduler,
+            torch_dtype=torch.bfloat16,
+        )
+        lora_path = hf_hub_download(repo_id=LORA_REPO, filename=LORA_FILE)
+        self.pipe.load_lora_weights(lora_path)
         self.pipe.to("cuda")
         self.pipe.set_progress_bar_config(disable=True)
+
         # Logged so the cold-start share of a bill is visible rather than guessed.
-        print(f"[image-editor] pipeline on GPU in {time.time() - started:.1f}s")
+        print(
+            f"[image-editor] pipeline + 4-step LoRA on GPU in "
+            f"{time.time() - started:.1f}s"
+        )
 
     @modal.method()
     def edit(
@@ -297,10 +303,10 @@ class Editor:
         images: list[bytes],
         prompt: str,
         steps: int = DEFAULT_STEPS,
-        cfg: float = 4.0,
+        cfg: float = DEFAULT_CFG,
         seed: int = 0,
     ) -> dict[str, Any]:
-        """Edit one image (or compose several) with a natural-language prompt."""
+        """Edit one image, or compose several, from a natural-language instruction."""
         import time
 
         import torch
@@ -320,22 +326,24 @@ class Editor:
             img.load()
             pil.append(img.convert("RGB"))
 
-        # Parameter set matches Qwen's official 2511 example exactly
-        # (true_cfg_scale 4.0, negative_prompt " ", guidance_scale 1.0).
         generator = torch.Generator(device="cuda").manual_seed(int(seed))
+        kwargs: dict[str, Any] = {
+            "image": pil,
+            "prompt": prompt,
+            "generator": generator,
+            "true_cfg_scale": float(cfg),
+            "negative_prompt": " ",  # what the edit models expect
+            "num_inference_steps": steps,
+        }
+        # The Lightning reference passes no guidance_scale at all, while Qwen's
+        # 40-step example passes 1.0. Follow whichever mode is in use rather than
+        # assuming the two are interchangeable.
+        if steps > LIGHTNING_STEPS:
+            kwargs["guidance_scale"] = 1.0
 
         started = time.time()
         with torch.inference_mode():
-            result = self.pipe(
-                image=pil,
-                prompt=prompt,
-                generator=generator,
-                true_cfg_scale=float(cfg),
-                negative_prompt=" ",
-                num_inference_steps=steps,
-                guidance_scale=1.0,
-                num_images_per_prompt=1,
-            )
+            result = self.pipe(**kwargs)
         elapsed = time.time() - started
 
         buf = io.BytesIO()
@@ -344,227 +352,43 @@ class Editor:
             "png": buf.getvalue(),
             "seconds": round(elapsed, 2),
             "steps": steps,
+            "cfg": float(cfg),
             "input_images": len(pil),
             "size": list(result.images[0].size),
         }
 
 
 def _editor() -> Any:
-    """Resolve the deployed GPU class (from a web container or a local entrypoint)."""
+    """Resolve the deployed GPU class, from a web container or a local entrypoint."""
     return modal.Cls.from_name(APP_NAME, "Editor")
 
 
 def _run_edit(
     images: list[bytes], prompt: str, steps: int, cfg: float, seed: int
 ) -> dict[str, Any]:
-    """The one place that calls the GPU. Used by the UI, the API and the smoke test.
-
-    All three share it so a change to the model's calling convention cannot land
-    in one path and miss the others.
-    """
+    """The one place that calls the GPU, shared by the API and the smoke test."""
     return _editor()().edit.remote(
         images=images, prompt=prompt, steps=int(steps), cfg=float(cfg), seed=int(seed)
     )
 
 
 # --------------------------------------------------------------------------- #
-# Gradio UI (CPU container, calls the GPU class over RPC)
+# JSON API - called by the Vercel app's server, never by a browser
 # --------------------------------------------------------------------------- #
 
 
-@app.function(
-    image=web_image,
-    secrets=_ui_secrets(),
-    timeout=1200,
-    scaledown_window=300,
-    max_containers=2,
-)
-@modal.concurrent(max_inputs=8)
-@modal.asgi_app()
-def ui() -> Any:
-    import os
-
-    import gradio as gr
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse
-    from gradio.routes import mount_gradio_app
-    from PIL import Image
-
-    user = os.environ.get("GRADIO_USER")
-    password = os.environ.get("GRADIO_PASSWORD")
-
-    # Auth is required by default, because this endpoint is on the public internet
-    # and every edit spends the owner's money - the risk is the wallet, not privacy.
-    # But a single-user tool may reasonably decide that risk is acceptable, so the
-    # requirement can be switched off explicitly. It has to be explicit: a typo in a
-    # secret should not silently publish an H100.
-    auth_mode = os.environ.get("IMAGE_EDITOR_UI_AUTH", "required").strip().lower()
-    open_to_all = auth_mode in {"off", "none", "public", "0", "false"}
-
-    if not (user and password) and not open_to_all:
-        # Report which expected variables actually arrived. Modal never exposes a
-        # Secret's contents, so without this the page can only say "not configured"
-        # and the cause - a secret created without its keys, or with an empty value -
-        # is invisible from outside.
-        return _misconfigured_app(
-            {
-                "GRADIO_USER": bool(user),
-                "GRADIO_PASSWORD": bool(password),
-            },
-            auth_mode,
-        )
-
-    if open_to_all and not (user and password):
-        print(
-            "[image-editor] WARNING: IMAGE_EDITOR_UI_AUTH is off - this endpoint is "
-            "public and anyone with the URL can spend your GPU credit."
-        )
-
-    def run_edit(image, prompt, steps, cfg, seed, progress=gr.Progress()):
-        if not image:
-            raise gr.Error("Upload an image first.")
-        if not (prompt or "").strip():
-            raise gr.Error("Describe the edit you want.")
-
-        def encode(item):
-            """Accept either a path (gr.File) or a PIL image (gr.Image).
-
-            Both components are plausible for this UI; accepting either keeps the
-            handler independent of which one is wired in.
-            """
-            if isinstance(item, str):
-                with open(item, "rb") as handle:
-                    return handle.read()
-            if isinstance(item, bytes):
-                return item
-            buf = io.BytesIO()
-            item.convert("RGB").save(buf, format="PNG")
-            return buf.getvalue()
-
-        payload = (image if isinstance(image, list) else [image])[:MAX_IMAGES]
-        progress(0.05, desc="Booting the editor (cold start loads 57.7 GB)...")
-
-        out = _run_edit([encode(im) for im in payload], prompt, steps, cfg, seed)
-        progress(1.0, desc="Done")
-        return Image.open(io.BytesIO(out["png"])), (
-            f"{out['seconds']}s · {out['steps']} steps · {out['size'][0]}x{out['size'][1]}"
-        )
-
-    with gr.Blocks(title="image-editor") as demo:
-        gr.Markdown(
-            "## image-editor\n"
-            "Qwen-Image-Edit-2511 on Modal. Runs on demand and shuts down after "
-            "a minute idle, so the first edit after a pause waits for a cold start."
-        )
-        with gr.Row():
-            with gr.Column():
-                # type="filepath", NOT "pil": gr.File accepts only
-                # ['filepath', 'binary'] - "pil" is gr.Image's parameter. Passing
-                # it raises at component construction, which happens *after* the
-                # auth gate, so the UI crash-looped only once credentials were
-                # configured and the guard stopped short-circuiting.
-                inputs = gr.File(
-                    label=f"Reference image(s) - up to {MAX_IMAGES}",
-                    file_count="multiple",
-                    type="filepath",
-                )
-                prompt = gr.Textbox(
-                    label="Edit instruction",
-                    placeholder="Make the sky a dramatic sunset and keep the subject unchanged",
-                    lines=3,
-                )
-                with gr.Row():
-                    steps = gr.Slider(4, MAX_STEPS, value=DEFAULT_STEPS, step=1, label="Steps")
-                    cfg = gr.Slider(1.0, 8.0, value=4.0, step=0.5, label="true_cfg_scale")
-                seed = gr.Number(value=0, label="Seed", precision=0)
-                go = gr.Button("Edit", variant="primary")
-            with gr.Column():
-                output = gr.Image(label="Result", type="pil")
-                meta = gr.Markdown()
-
-        go.click(run_edit, [inputs, prompt, steps, cfg, seed], [output, meta])
-        prompt.submit(run_edit, [inputs, prompt, steps, cfg, seed], [output, meta])
-
-    # Only pass auth when credentials exist. mount_gradio_app would treat a
-    # (None, None) tuple as "auth configured" and reject everything.
-    auth_kwargs: dict[str, Any] = {}
-    if user and password:
-        auth_kwargs = {
-            "auth": (user, password),
-            "auth_message": "image-editor is private.",
-        }
-
-    return mount_gradio_app(
-        app=FastAPI(),
-        blocks=demo,
-        path="/",
-        **auth_kwargs,
-    )
-
-
-def _misconfigured_app(
-    diag: dict[str, bool] | None = None, auth_mode: str = "required"
-) -> Any:
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse
-
-    rows = ""
-    if diag:
-        cells = "".join(
-            f"<tr><td><code>{name}</code></td>"
-            f"<td>{'present' if ok else '<b>missing</b>'}</td></tr>"
-            for name, ok in diag.items()
-        )
-        rows = (
-            "<p>What the container actually received:</p>"
-            f"<table cellpadding=4 border=1>{cells}</table>"
-            "<p>If both say <b>missing</b>, the secret exists but carries no keys - "
-            "most likely it was created without the KEY=VALUE arguments, or the "
-            "password was empty because the shell variable holding it was not set.</p>"
-        )
-
-    page = FastAPI()
-
-    @page.get("/", response_class=HTMLResponse)
-    def _explain() -> str:
-        return (
-            "<html><body style='font-family:ui-sans-serif;max-width:44rem;margin:4rem auto'>"
-            "<h2>image-editor is not configured yet</h2>"
-            "<p>This endpoint is on the public internet and every edit spends your "
-            "Modal credit, so by default it will not serve without a password. That "
-            "is a protection for your wallet rather than for your privacy.</p>"
-            f"{rows}"
-            "<h3>Option 1 &mdash; give it a password</h3>"
-            "<p>Pick one you will remember, then redeploy:</p>"
-            f"<pre>modal secret create {AUTH_SECRET_NAME} --force "
-            "GRADIO_USER=you GRADIO_PASSWORD=your-chosen-password</pre>"
-            "<h3>Option 2 &mdash; run it open, for one user</h3>"
-            "<p>If you accept that anyone who learns this URL can spend your credit, "
-            "set <code>IMAGE_EDITOR_UI_AUTH=off</code> on the <code>ui</code> function "
-            "and it will serve without a password.</p>"
-            f"<p>Currently <code>IMAGE_EDITOR_UI_AUTH</code> is: {auth_mode}</p>"
-            "</body></html>"
-        )
-
-    return page
-
-
-# --------------------------------------------------------------------------- #
-# JSON API (proxy-token protected)
-# --------------------------------------------------------------------------- #
-
-
-@app.function(image=web_image, timeout=1200)
+@app.function(image=api_image, timeout=1200)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def api(payload: dict[str, Any]) -> dict[str, Any]:
-    """JSON edit endpoint.
+    """Edit endpoint.
 
-    Auth is Modal proxy tokens, so no secret lives in this codebase. Curl it with:
+    Proxy-auth protected, so the credential lives in the Vercel app's environment
+    variables and never reaches a browser. Called server-to-server, so there is no
+    CORS to configure and no client-side secret to leak.
 
-        curl -X POST <url> \\
-          -H "Authorization: Bearer $MODAL_TOKEN_ID.$MODAL_TOKEN_SECRET" \\
-          -H 'Content-Type: application/json' \\
-          -d '{"image_b64": "...", "prompt": "make it night"}'
+        POST <url>
+        Authorization: Bearer <MODAL_TOKEN_ID>.<MODAL_TOKEN_SECRET>
+        {"image_b64": "...", "prompt": "...", "steps": 4, "seed": 0}
 
     Images travel base64-encoded in both directions.
     """
@@ -574,7 +398,7 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     if not prompt:
         return {"ok": False, "error": "prompt is required"}
 
-    raw = payload.get("image_b64") or payload.get("images_b64") or []
+    raw = payload.get("image_b64") or []
     if isinstance(raw, str):
         raw = [raw]
     if not raw:
@@ -587,13 +411,19 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"image_b64 is not valid base64: {exc}"}
 
-    out = _run_edit(
-        decoded,
-        prompt,
-        payload.get("steps", DEFAULT_STEPS),
-        payload.get("cfg", 4.0),
-        payload.get("seed", 0),
-    )
+    try:
+        out = _run_edit(
+            decoded,
+            prompt,
+            payload.get("steps", DEFAULT_STEPS),
+            payload.get("cfg", DEFAULT_CFG),
+            payload.get("seed", 0),
+        )
+    except Exception as exc:
+        # Surface model failures as JSON rather than an opaque 500, so the web app
+        # can show the user what actually went wrong.
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     return {
         "ok": True,
         "image_b64": base64.b64encode(out["png"]).decode("ascii"),
@@ -605,37 +435,32 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.local_entrypoint()
 def smoke(
-    prompt: str = "Turn the sky into a dramatic sunset, keep everything else unchanged",
+    prompt: str = "Make the scene at night with warm street lights",
     image: str = "",
 ) -> None:
     """One real edit on the deployed GPU class. No HTTP and no auth in the way.
 
-    The point is to exercise the expensive path (weight load -> GPU -> edit)
-    without the web layer, so a failure here is unambiguously the model's:
-
         uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke \
-            --prompt "make it snow" --image inputs/ref.jpg
+            --prompt "make it snow" --image inputs/ref.png
     """
     import pathlib
 
     if image:
         image_path = pathlib.Path(image)
     else:
-        candidates = sorted(
-            p for p in pathlib.Path("inputs").glob("*") if p.is_file()
-        ) if pathlib.Path("inputs").exists() else []
+        candidates = (
+            sorted(p for p in pathlib.Path("inputs").glob("*") if p.is_file())
+            if pathlib.Path("inputs").exists()
+            else []
+        )
         if not candidates:
-            raise SystemExit(
-                "No image given and nothing under ./inputs - pass --image <path>."
-            )
+            raise SystemExit("No image given and nothing under ./inputs - pass --image.")
         image_path = candidates[0]
 
     if not image_path.is_file():
         raise SystemExit(f"not a file: {image_path}")
 
-    out = _run_edit(
-        [image_path.read_bytes()], prompt, DEFAULT_STEPS, 4.0, 0
-    )
+    out = _run_edit([image_path.read_bytes()], prompt, DEFAULT_STEPS, DEFAULT_CFG, 0)
 
     out_dir = pathlib.Path("outputs")
     out_dir.mkdir(exist_ok=True)
