@@ -64,6 +64,22 @@ CPU-bound initialization (imports, JIT) rather than bytes read from disk. For a
 57.7 GB checkpoint, initialization *is* storage-bound, so a GPU snapshot would add
 overhead and save nothing.
 
+## Verified environment
+
+Measured by `check_env` on a Modal CPU container — not copied from a README:
+
+| Component | Version |
+|---|---|
+| torch | 2.14.1+cu130 |
+| diffusers | 0.41.0 |
+| transformers | 5.19.0 |
+| `QwenImageEditPlusPipeline` present | yes |
+
+Qwen's Quick Start tells you to install diffusers from git. The released
+**0.41.0** already ships the pipeline class, so this image pins a release instead
+and stays reproducible. Qwen also asks for `transformers>=4.51.3`; the resolver
+picked 5.19.0, which satisfies it.
+
 ## Setup
 
 Prerequisites: an Apple Silicon or any machine with Python 3.12+, `uv`, and a
