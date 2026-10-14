@@ -53,6 +53,18 @@ DEFAULT_STEPS = 40
 # Gradio UI credentials live in this Modal Secret, never in the repo.
 AUTH_SECRET_NAME = "image-editor-auth"
 
+# Whether the browser UI requires a password.
+#
+#   "required" (default) - refuses to serve without GRADIO_USER/GRADIO_PASSWORD
+#   "off"                - serves to anyone who has the URL
+#
+# The default is "required" for one reason: this endpoint is on the public
+# internet and every edit spends GPU credit. An open endpoint that someone else
+# finds burns $3.95/hr, and max_containers=1 does not limit that - it limits how
+# many GPUs run at once, not for how long. For a genuinely single-user tool "off"
+# is a defensible choice, so it is one line rather than an argument.
+UI_AUTH_MODE = "required"
+
 app = modal.App(APP_NAME)
 weights = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
@@ -92,6 +104,7 @@ gpu_image = (
 web_image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_pip_install("fastapi[standard]", "gradio", "pillow")
+    .env({"IMAGE_EDITOR_UI_AUTH": UI_AUTH_MODE})
 )
 
 
@@ -116,9 +129,9 @@ def _ui_secrets() -> list[modal.Secret]:
     print(
         f"[image-editor] secret {AUTH_SECRET_NAME!r} not found. The Gradio UI will serve\n"
         f"[image-editor] a setup page instead of an editor until you create it:\n"
-        f"[image-editor]     PW=$(openssl rand -base64 24 | tr -d '\\n'); echo \"password: $PW\"\n"
-        f"[image-editor]     modal secret create {AUTH_SECRET_NAME} "
-        'GRADIO_USER=you GRADIO_PASSWORD="$PW"' 
+        f"[image-editor]     modal secret create {AUTH_SECRET_NAME} --force "
+        "GRADIO_USER=you GRADIO_PASSWORD=your-chosen-password\n"
+        f"[image-editor] (or opt out entirely with IMAGE_EDITOR_UI_AUTH=off)"
     )
     return []
 
@@ -380,11 +393,32 @@ def ui() -> Any:
     user = os.environ.get("GRADIO_USER")
     password = os.environ.get("GRADIO_PASSWORD")
 
-    # Fail closed. An unauthenticated endpoint backed by an H100 is an open
-    # invitation to spend someone else's credit, so a missing secret serves an
-    # explanation rather than an editor.
-    if not (user and password):
-        return _misconfigured_app()
+    # Auth is required by default, because this endpoint is on the public internet
+    # and every edit spends the owner's money - the risk is the wallet, not privacy.
+    # But a single-user tool may reasonably decide that risk is acceptable, so the
+    # requirement can be switched off explicitly. It has to be explicit: a typo in a
+    # secret should not silently publish an H100.
+    auth_mode = os.environ.get("IMAGE_EDITOR_UI_AUTH", "required").strip().lower()
+    open_to_all = auth_mode in {"off", "none", "public", "0", "false"}
+
+    if not (user and password) and not open_to_all:
+        # Report which expected variables actually arrived. Modal never exposes a
+        # Secret's contents, so without this the page can only say "not configured"
+        # and the cause - a secret created without its keys, or with an empty value -
+        # is invisible from outside.
+        return _misconfigured_app(
+            {
+                "GRADIO_USER": bool(user),
+                "GRADIO_PASSWORD": bool(password),
+            },
+            auth_mode,
+        )
+
+    if open_to_all and not (user and password):
+        print(
+            "[image-editor] WARNING: IMAGE_EDITOR_UI_AUTH is off - this endpoint is "
+            "public and anyone with the URL can spend your GPU credit."
+        )
 
     def run_edit(image, prompt, steps, cfg, seed, progress=gr.Progress()):
         if image is None:
@@ -436,18 +470,43 @@ def ui() -> Any:
         go.click(run_edit, [inputs, prompt, steps, cfg, seed], [output, meta])
         prompt.submit(run_edit, [inputs, prompt, steps, cfg, seed], [output, meta])
 
+    # Only pass auth when credentials exist. mount_gradio_app would treat a
+    # (None, None) tuple as "auth configured" and reject everything.
+    auth_kwargs: dict[str, Any] = {}
+    if user and password:
+        auth_kwargs = {
+            "auth": (user, password),
+            "auth_message": "image-editor is private.",
+        }
+
     return mount_gradio_app(
         app=FastAPI(),
         blocks=demo,
         path="/",
-        auth=(user, password),
-        auth_message="image-editor is private.",
+        **auth_kwargs,
     )
 
 
-def _misconfigured_app() -> Any:
+def _misconfigured_app(
+    diag: dict[str, bool] | None = None, auth_mode: str = "required"
+) -> Any:
     from fastapi import FastAPI
     from fastapi.responses import HTMLResponse
+
+    rows = ""
+    if diag:
+        cells = "".join(
+            f"<tr><td><code>{name}</code></td>"
+            f"<td>{'present' if ok else '<b>missing</b>'}</td></tr>"
+            for name, ok in diag.items()
+        )
+        rows = (
+            "<p>What the container actually received:</p>"
+            f"<table cellpadding=4 border=1>{cells}</table>"
+            "<p>If both say <b>missing</b>, the secret exists but carries no keys - "
+            "most likely it was created without the KEY=VALUE arguments, or the "
+            "password was empty because the shell variable holding it was not set.</p>"
+        )
 
     page = FastAPI()
 
@@ -456,14 +515,19 @@ def _misconfigured_app() -> Any:
         return (
             "<html><body style='font-family:ui-sans-serif;max-width:44rem;margin:4rem auto'>"
             "<h2>image-editor is not configured yet</h2>"
-            "<p>The Gradio UI needs a password before it will serve, so that an "
-            "H100-backed endpoint is never open to the internet.</p>"
-            "<p>Create the secret, then redeploy. Generate the password "
-            "somewhere you can read it first &mdash; Modal secrets are write-only, "
-            "so a password generated straight into the secret cannot be recovered:</p>"
-            "<pre>PW=$(openssl rand -base64 24 | tr -d '\\n'); echo \"password: $PW\"\n"
-            f"modal secret create {AUTH_SECRET_NAME} "
-            'GRADIO_USER=you GRADIO_PASSWORD="$PW"</pre>'
+            "<p>This endpoint is on the public internet and every edit spends your "
+            "Modal credit, so by default it will not serve without a password. That "
+            "is a protection for your wallet rather than for your privacy.</p>"
+            f"{rows}"
+            "<h3>Option 1 &mdash; give it a password</h3>"
+            "<p>Pick one you will remember, then redeploy:</p>"
+            f"<pre>modal secret create {AUTH_SECRET_NAME} --force "
+            "GRADIO_USER=you GRADIO_PASSWORD=your-chosen-password</pre>"
+            "<h3>Option 2 &mdash; run it open, for one user</h3>"
+            "<p>If you accept that anyone who learns this URL can spend your credit, "
+            "set <code>IMAGE_EDITOR_UI_AUTH=off</code> on the <code>ui</code> function "
+            "and it will serve without a password.</p>"
+            f"<p>Currently <code>IMAGE_EDITOR_UI_AUTH</code> is: {auth_mode}</p>"
             "</body></html>"
         )
 

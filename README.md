@@ -130,10 +130,11 @@ uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_env
 uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights
 
 # 5. a password for the Gradio UI — the UI refuses to serve without it.
-#    Generate it where you can READ it: Modal secrets are write-only, so a
-#    password generated straight into the secret can never be recovered.
-PW=$(openssl rand -base64 24 | tr -d '\n'); echo "your UI password: $PW"
-modal secret create image-editor-auth GRADIO_USER=you GRADIO_PASSWORD="$PW"
+#    Pick your own so you are guaranteed to know it. (If you prefer a generated
+#    one, do it in ONE shell: a password generated straight into the secret can
+#    never be read back, and splitting the two lines leaves $PW empty.)
+modal secret create image-editor-auth --force \
+  GRADIO_USER=you GRADIO_PASSWORD=your-chosen-password
 
 # 6. deploy
 uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
