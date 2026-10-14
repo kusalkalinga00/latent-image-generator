@@ -47,7 +47,9 @@ async function prepareImage(file: File): Promise<Attachment> {
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not process that image in this browser')
   ctx.drawImage(bitmap, 0, 0, width, height)
-  bitmap.close?.()
+  // createImageBitmap always returns an object with close(); the optional chain
+  // here was flagged as unnecessary and it was.
+  bitmap.close()
 
   const dataUrl = canvas.toDataURL('image/png')
   return {
