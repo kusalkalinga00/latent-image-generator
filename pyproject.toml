@@ -1,0 +1,18 @@
+[project]
+name = "image-editor"
+version = "0.1.0"
+description = "Qwen-Image-Edit-2511 hosted on Modal — private, on-demand, scale-to-zero image editing."
+readme = "README.md"
+authors = [
+    { name = "Kusal", email = "kusalkalingainfo@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+    "modal_app",
+]
+
+[tool.uv.sources]
+modal-app = { workspace = true }

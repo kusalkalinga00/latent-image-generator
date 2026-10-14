@@ -1,0 +1,17 @@
+[project]
+name = "modal-app"
+version = "0.1.0"
+description = "Modal deployment of Qwen/Qwen-Image-Edit-2511 (Gradio UI + JSON endpoint)."
+readme = "README.md"
+authors = [
+    { name = "Kusal", email = "kusalkalingainfo@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "modal>=1.5.3",
+    "pillow>=11.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.25,<0.12.0"]
+build-backend = "uv_build"

@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.py[cod]
+.python-version.local
+.DS_Store
+.modal/
+
+# --- secrets: never commit ---
+.env
+*.env
+!.env.example
+.modal.toml
+
+# --- model weights must never enter the repo ---
+*.safetensors
+*.ckpt
+*.bin
+*.gguf
+*.pth
+weights/
+models/
+
+# --- local images / outputs ---
+inputs/
+outputs/
+storage/*
+!storage/.gitkeep
