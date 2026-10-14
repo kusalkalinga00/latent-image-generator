@@ -71,14 +71,26 @@ Measured by `check_env` on a Modal CPU container — not copied from a README:
 | Component | Version |
 |---|---|
 | torch | 2.14.1+cu130 |
+| torchvision | 0.29.1+cu130 |
 | diffusers | 0.41.0 |
 | transformers | 5.19.0 |
 | `QwenImageEditPlusPipeline` present | yes |
+| processor resolves to | `Qwen2VLProcessor` |
 
 Qwen's Quick Start tells you to install diffusers from git. The released
 **0.41.0** already ships the pipeline class, so this image pins a release instead
 and stays reproducible. Qwen also asks for `transformers>=4.51.3`; the resolver
 picked 5.19.0, which satisfies it.
+
+Two traps this check exists to catch, both learned the expensive way:
+
+- **`torchvision` is required** even though nothing at import time asks for it.
+  The pipeline's Qwen2.5-VL processor imports it lazily, so the image builds
+  happily and the model then fails to load *on the GPU*. Importing a library does
+  not exercise it.
+- **The processor needs `subfolder="processor"`.** Every component lives in its own
+  subfolder and there is no root-level processing class, so a root-level lookup
+  reports "Unrecognized processing class" against a perfectly healthy model.
 
 ## Setup
 
