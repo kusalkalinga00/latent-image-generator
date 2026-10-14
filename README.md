@@ -1,210 +1,162 @@
 # image-editor
 
-[Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) hosted on
-[Modal](https://modal.com) for personal use. An H100-backed image editor that runs
-on demand, shuts down when you stop using it, and **never puts a model weight on
-your machine.**
+[Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) distilled to **4
+steps**, running as a GPU service on [Modal](https://modal.com) with a React UI on Vercel.
+Edit a photo by describing the change in plain language.
 
-## What it does
-
-Upload one to three reference images, describe the edit in plain language, get a
-result back. The model is a 20B MMDiT with a Qwen2.5-VL text encoder — strong at
-preserving a subject's identity while changing the scene, and unusually good at
-editing **text inside images**.
-
-## Where everything lives
-
-| Thing | Location |
-|---|---|
-| Code | this repo (a few MB) |
-| 57.7 GB of weights | a **Modal Volume** in Modal's cloud, mounted at `/models` |
-| The download | runs in a Modal container, Hugging Face → Volume, **once ever** |
-| Images you edit | passed in per request, never persisted |
-
-Nothing is written to your disk except the code, and `inputs/` + `outputs/` which
-are git-ignored.
-
-## Cost
-
-Modal's Starter plan includes **$30/month of compute**. GPU rates are per second:
-
-| GPU | Rate | $30 buys |
-|---|---|---|
-| L40S 48 GB | $1.95/hr | 15.4 hr |
-| A100 40 GB | $2.10/hr | 14.3 hr |
-| A100 80 GB | $2.50/hr | 12.0 hr |
-| **H100 80 GB** (this app) | **$3.95/hr** | **7.6 hr** |
-| B200 180 GB | $6.25/hr | 4.8 hr |
-
-Volume storage is $0.09/GiB-month **with the first 1 TiB free**, so the 57.7 GB
-checkpoint costs **$0.00**.
-
-### The only number that matters
-
-Billing is per GPU-second, so the design is entirely about how long an H100 is
-alive. Three decisions follow, and they are load-bearing rather than stylistic:
-
-1. **`max_containers=1`** — a personal tool must never bill two H100s at once.
-2. **`scaledown_window=60`** — the GPU is released a minute after the last edit.
-   Keeping one H100 warm for a month would cost **$2,848**, or 95× the credit.
-3. **The Gradio UI runs on a separate CPU-only container** that calls the GPU over
-   Modal's internal RPC. This is the non-obvious one. A browser holding an open
-   Gradio tab would otherwise keep the H100 alive while you read the result — at
-   $3.95/hr. On a CPU container that same idle tab costs cents.
-
-The trade is cold-start latency: the first edit after a pause waits while 57.7 GB
-loads into VRAM. That is the honest cost of scale-to-zero, and it is the right
-trade at $30/month.
-
-### What it actually costs
-
-Measured on an H100 with a 896×1184 image at 40 steps:
-
-| | Measured | Cost |
-|---|---|---|
-| Load 53.76 GiB into VRAM (once per container) | 28.6 s | $0.031 |
-| A 40-step edit | 33.5 s | $0.037 |
-| **First edit of a session** | ~62 s | **$0.068** |
-| **Each further edit while warm** | ~34 s | **$0.037** |
-
-So $30/month is roughly **440 edits** if every one is a cold start, or **~780** if
-you batch several edits per sitting. Batching roughly halves the per-edit price,
-because the weight load is paid once per container rather than once per edit.
-
-Full detail, including the rates and what would blow the budget, in
-[`docs/COST.md`](docs/COST.md).
-
-### What was deliberately *not* done
-
-**GPU memory snapshots.** Modal's own docs say snapshots "do not speed up model
-loading from storage... and may even worsen them", because a snapshot helps with
-CPU-bound initialization (imports, JIT) rather than bytes read from disk. For a
-57.7 GB checkpoint, initialization *is* storage-bound, so a GPU snapshot would add
-overhead and save nothing.
-
-## Verified environment
-
-Measured by `check_env` on a Modal CPU container — not copied from a README:
-
-| Component | Version |
-|---|---|
-| torch | 2.14.1+cu130 |
-| torchvision | 0.29.1+cu130 |
-| diffusers | 0.41.0 |
-| transformers | 5.19.0 |
-| `QwenImageEditPlusPipeline` present | yes |
-| processor resolves to | `Qwen2VLProcessor` |
-
-Qwen's Quick Start tells you to install diffusers from git. The released
-**0.41.0** already ships the pipeline class, so this image pins a release instead
-and stays reproducible. Qwen also asks for `transformers>=4.51.3`; the resolver
-picked 5.19.0, which satisfies it.
-
-Two traps this check exists to catch, both learned the expensive way:
-
-- **`torchvision` is required** even though nothing at import time asks for it.
-  The pipeline's Qwen2.5-VL processor imports it lazily, so the image builds
-  happily and the model then fails to load *on the GPU*. Importing a library does
-  not exercise it.
-- **The processor needs `subfolder="processor"`.** Every component lives in its own
-  subfolder and there is no root-level processing class, so a root-level lookup
-  reports "Unrecognized processing class" against a perfectly healthy model.
-
-## Setup
-
-Prerequisites: an Apple Silicon or any machine with Python 3.12+, `uv`, and a
-Modal account.
-
-```sh
-# 1. authenticate (opens a browser; writes ~/.modal.toml)
-uv tool install modal
-modal setup
-
-# 2. install the workspace
-uv sync --all-packages
-
-# 3. verify the dependency set can import the pipeline — CPU only, costs ~nothing
-uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_env
-
-# 4. pull the weights into the Volume, once (~57.7 GB, 2-5 min, storage is free)
-uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights
-
-# 5. a password for the Gradio UI — the UI refuses to serve without it.
-#    Pick your own so you are guaranteed to know it. (If you prefer a generated
-#    one, do it in ONE shell: a password generated straight into the secret can
-#    never be read back, and splitting the two lines leaves $PW empty.)
-modal secret create image-editor-auth --force \
-  GRADIO_USER=you GRADIO_PASSWORD=your-chosen-password
-
-# 6. deploy
-uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
+```
+Browser (TanStack Start / React)
+   |  posts an image to a server function
+   v
+Vercel -- src/lib/edit.ts        <- holds the Modal credential, never the browser
+   |
+   v
+Modal -- Qwen-Image-Edit-2511 + 4-step Lightning LoRA on an H100
 ```
 
-Step 6 prints two URLs: the Gradio UI and the JSON API.
+Two deliberate consequences of that shape:
 
-### One real edit, no HTTP in the way
-
-```sh
-uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke \
-  --image inputs/ref.png --prompt "make it snow, keep the person unchanged"
-```
-
-Writes `outputs/smoke-ref.png` and prints how long the edit took. This goes
-straight to the GPU class, so a failure here is unambiguously the model rather
-than the web layer.
-
-### The JSON API
-
-Protected by Modal **proxy tokens**, so no secret lives in this repo. Create a
-token in the Modal dashboard (Settings → Proxy Tokens) or
-`modal workspace proxy-tokens`, then:
-
-```sh
-curl -X POST "$IMAGE_EDITOR_API_URL" \
-  -H "Authorization: Bearer $MODAL_TOKEN_ID.$MODAL_TOKEN_SECRET" \
-  -H 'Content-Type: application/json' \
-  -d "{\"image_b64\": \"$(base64 -i inputs/ref.png)\", \"prompt\": \"make it night\"}"
-```
-
-Returns `{"ok": true, "image_b64": "...", "seconds": 41.2, ...}`.
-
-## Troubleshooting
-
-Things that cost real time here, recorded so they cost it once.
-
-**A fix appears not to work.** `modal.Cls.from_name` resolves the **deployed**
-app, not your local file. So after changing the image or the `Editor` class you
-must `modal deploy` before a local `modal run ...::smoke` can see the change.
-Skipping that made a correct torchvision fix look like a broken model, and the
-deployed container crash-looped on the old image the whole time.
-
-**`ImportError: Qwen2VLVideoProcessor requires the Torchvision library`.** Add
-`torchvision` to the image. Nothing at import time asks for it — the processor
-pulls it in lazily at load — so the image builds clean and fails only on the GPU.
-
-**`Unrecognized processing class in Qwen/Qwen-Image-Edit-2511`.** The model is
-fine. Every component lives in a subfolder, so the processor needs
-`subfolder="processor"`.
-
-**`DeserializationError: the 'torch' module is not available`.** A Function
-returned something carrying a torch-defined class (version strings are a common
-trap), and Modal unpickles return values *locally*, where torch does not exist.
-Coerce to plain `str`/`bool`, or return JSON.
-
-**A cold start is slower than a model this size should be.** Check the container
-is not crash-looping before optimising anything — repeated failed starts look
-exactly like slowness from the outside and bill for every attempt.
+- **The browser never talks to Modal.** No credential reaches a client, no CORS, and the
+  endpoint cannot be scraped out of the page source. The token lives in Vercel's environment
+  variables.
+- **The GPU service serves no UI.** It answers JSON and nothing else. An earlier version
+  embedded a Gradio app, which then needed its own password, its own secret, and its own
+  failure modes - all of it removed, about 175 lines.
 
 ## Layout
 
+| Path | What |
+|---|---|
+| `web/` | TanStack Start app (React 19, Tailwind 4) - deploy target: Vercel |
+| `modal_app/` | the Modal GPU service (Python) |
+| `docs/COST.md` | rates, budget, and what would blow it |
+
+## Cost
+
+Measured on an H100 with a 896x1184 image:
+
+| | Measured | Cost |
+|---|---|---|
+| Load 53.76 GiB into VRAM (once per container) | 31.7 s | $0.035 |
+| A 4-step edit | **3.61 s** | **$0.004** |
+| First edit of a session | ~35 s | $0.039 |
+| Each further edit while warm | ~3.6 s | $0.004 |
+
+4 steps against 40 is **9.3x faster** - 3.61 s versus 33.53 s for the same image - which moves
+the ceiling on a $30/month credit from roughly 810 edits to roughly **7,500**. That is the
+single change that makes a public app viable.
+
+Three things keep it there: `max_containers=1` (one GPU whatever the traffic),
+`scaledown_window=60` (release it a minute after the last edit - a warm H100 for a month is
+$2,848), and the 4-step distillation itself.
+
+Not used, deliberately: **GPU memory snapshots.** Modal's docs say they "do not speed up model
+loading from storage" and may worsen it, and for a 53.76 GiB checkpoint init *is*
+storage-bound.
+
+## Setup
+
+### 1. The Modal service
+
+```sh
+modal setup                      # authenticate
+uv sync --all-packages
+
+# verify the dependency set on a CPU container - costs cents, not a GPU
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_env
+
+# one-off: base weights + the 4-step LoRA into the Modal Volume (~54.6 GiB, storage free)
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights
+
+# prove the distilled model runs, on a real GPU
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke \
+    --prompt "make it snow" --image inputs/ref.png
+
+uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
 ```
-modal_app/src/modal_app/app.py    the whole deployment
-docs/COST.md                      measured cost per edit
-inputs/                           your test images (git-ignored)
-outputs/                          results (git-ignored)
+
+`modal deploy` prints the endpoint URL. Note it.
+
+### 2. A proxy token
+
+```sh
+modal workspace proxy-tokens create
 ```
+
+Gives a `wk-...` id and a `ws-...` secret. **This is what keeps the endpoint private**, and it
+only ever lives server-side.
+
+### 3. The web app
+
+```sh
+cd web
+pnpm install
+cp .env.example .env      # then fill in the three values
+pnpm dev                  # http://localhost:3000
+```
+
+`.env` needs:
+
+```
+IMAGE_EDITOR_API_URL=https://<workspace>--image-editor-api.modal.run
+MODAL_TOKEN_ID=wk-...
+MODAL_TOKEN_SECRET=ws-...
+```
+
+**No `VITE_` prefix.** TanStack Start inlines `VITE_`-prefixed values into browser code, which
+would hand the credential to every visitor. These three are read only inside the server
+function.
+
+### 4. Deploy to Vercel
+
+```sh
+cd web
+pnpm dlx vercel deploy --prod
+```
+
+Then set the same three variables in **Vercel -> Settings -> Environment Variables** and
+redeploy. `web/vercel.json` already declares `framework: tanstack-start`; Vercel detects the
+build through Nitro.
+
+## What is going on inside the model
+
+The 4-step LoRA must be loaded onto a **rebuilt scheduler**, and this is the detail that decides
+whether the output is good or garbage. The distillation used `shift=3`, so the pipeline gets a
+`FlowMatchEulerDiscreteScheduler` with `base_shift` and `max_shift` both `math.log(3)`, plus
+`shift_terminal=None`, `stochastic_sampling=False` and `use_dynamic_shifting=True`. Calling
+`load_lora_weights()` on the pipeline's default scheduler is the mistake the Lightning repo
+documents as grid artifacts - a faint grid over an otherwise plausible image, which is exactly
+the kind of failure that survives a quick glance.
+
+Guidance is 1.0: a distilled model is guidance-free. The Lightning reference passes no
+`guidance_scale` at all while Qwen's 40-step example passes 1.0, so the code follows whichever
+mode is in use rather than assuming they are interchangeable.
+
+## Troubleshooting
+
+**A fix appears not to work.** `modal.Cls.from_name` resolves the **deployed** app, not your
+local file, so after changing the image or the `Editor` class you must `modal deploy` before a
+local smoke run can see it. Skipping that makes a correct fix look broken while the deployed
+container crash-loops on the old image.
+
+**`ImportError: Qwen2VLVideoProcessor requires the Torchvision library`** - add `torchvision`.
+
+**`ValueError: PEFT backend is required for load_lora_weights()`** - add `peft`.
+
+Both are the same trap: nothing at import time asks for them, so the image builds clean and the
+failure only lands on a GPU. `check_env` now loads the processor, imports `peft`, and constructs
+the distillation scheduler, so the next one of these costs cents rather than a container.
+
+**`Unrecognized processing class in Qwen/Qwen-Image-Edit-2511`** - a healthy model. Components
+live in subfolders, so the processor needs `subfolder="processor"`.
+
+**A 401 from the web app** means the proxy token is wrong, not that the model failed. The server
+returns Modal's status and body so the two are distinguishable.
+
+**A cold start slower than it should be may be a crash loop.** Containers that repeatedly fail to
+start still bill. Check `modal app logs` before optimising.
 
 ## Licence
 
-App code: do as you like. Model weights: **Apache 2.0**, from Qwen — ungated,
-so no Hugging Face token is required.
+App code: do as you like. Model weights: **Apache 2.0** (Qwen), and the Lightning LoRA is
+**Apache 2.0** (LightX2V). Neither is gated, so no Hugging Face token is needed.
