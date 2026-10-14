@@ -124,23 +124,33 @@ def _ui_secrets() -> list[modal.Secret]:
 
 
 @app.function(image=gpu_image, timeout=900)
-def check_env() -> dict[str, Any]:
+def check_env() -> str:
     """Prove the dependency set can import the pipeline before paying for a GPU.
 
     An image build is slow and an H100 container is expensive; this runs the
     risky part of initialization on a CPU container for fractions of a cent.
+
+    Returns a JSON *string*, and coerces every field to a plain str/bool. Modal
+    unpickles the return value in the **local** environment, which has no torch,
+    so handing back anything carrying a torch-defined class fails with a
+    misleading "the 'torch' module is not available in the local environment".
+    Version attributes are the trap: some are str subclasses defined inside torch.
     """
+    import json
+
     import diffusers
     import transformers
     import torch
 
-    return {
-        "torch": torch.__version__,
-        "diffusers": diffusers.__version__,
-        "transformers": transformers.__version__,
-        "has_qwen_image_edit_plus": hasattr(diffusers, "QwenImageEditPlusPipeline"),
-        "cuda_available_on_cpu_container": torch.cuda.is_available(),
+    info = {
+        "torch": str(torch.__version__),
+        "diffusers": str(diffusers.__version__),
+        "transformers": str(transformers.__version__),
+        "has_qwen_image_edit_plus": bool(hasattr(diffusers, "QwenImageEditPlusPipeline")),
+        "cuda_available_on_cpu_container": bool(torch.cuda.is_available()),
     }
+    print("[image-editor] env: " + json.dumps(info, indent=2))
+    return json.dumps(info)
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=5400, cpu=4)
