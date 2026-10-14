@@ -91,23 +91,31 @@ web_image = (
 )
 
 
-def _auth_secret() -> list[modal.Secret]:
-    """Attach the UI password secret when it exists.
+def _ui_secrets() -> list[modal.Secret]:
+    """Attach the UI password secret if it exists, without requiring it.
 
-    Resolved at import time so ``modal deploy`` still succeeds before the
-    secret has been created; the UI itself fails closed in that case rather
-    than serving an open editor.
+    This asks the API what exists rather than calling ``Secret.from_name`` and
+    catching. ``from_name`` is lazy: it hands back an unresolved handle and only
+    fails once Modal materialises it, which is too late to catch here and takes
+    the whole module down with it - including `check_env` and `download_weights`,
+    which need no secret at all. Measured the hard way.
     """
     try:
-        return [modal.Secret.from_name(AUTH_SECRET_NAME)]
-    except Exception as exc:  # NotFoundError, or any lookup failure
-        print(
-            f"[image-editor] {AUTH_SECRET_NAME!r} not found ({exc}). "
-            "The Gradio UI will refuse to serve until it exists:\n"
-            f"    modal secret create {AUTH_SECRET_NAME} "
-            "GRADIO_USER=you GRADIO_PASSWORD=$(openssl rand -base64 24)"
-        )
+        existing = {s.name for s in modal.Secret.objects.list()}
+    except Exception as exc:  # offline, or an API change
+        print(f"[image-editor] could not list secrets ({exc}); assuming none.")
         return []
+
+    if AUTH_SECRET_NAME in existing:
+        return [modal.Secret.from_name(AUTH_SECRET_NAME)]
+
+    print(
+        f"[image-editor] secret {AUTH_SECRET_NAME!r} not found. The Gradio UI will serve\n"
+        f"[image-editor] a setup page instead of an editor until you create it:\n"
+        f"[image-editor]     modal secret create {AUTH_SECRET_NAME} "
+        "GRADIO_USER=you GRADIO_PASSWORD=$(openssl rand -base64 24)"
+    )
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -278,7 +286,7 @@ def _run_edit(
 
 @app.function(
     image=web_image,
-    secrets=_auth_secret(),
+    secrets=_ui_secrets(),
     timeout=1200,
     scaledown_window=300,
     max_containers=2,
