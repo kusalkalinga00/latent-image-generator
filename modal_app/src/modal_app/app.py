@@ -88,6 +88,10 @@ gpu_image = (
         # Qwen's README says install diffusers from git. 0.41.0 ships
         # QwenImageEditPlusPipeline, so a pinned release is reproducible.
         "diffusers==0.41.0",
+        # Also invisible until load time: diffusers raises "PEFT backend is
+        # required for load_lora_weights()" only when the LoRA is attached, so the
+        # image builds and the pipeline constructs fine without it.
+        "peft",
         "transformers>=4.51.3",  # Qwen2.5-VL support, per Qwen's Quick Start
         "accelerate",
         "safetensors",
@@ -178,6 +182,39 @@ def check_env() -> str:
     except Exception as exc:
         info["processor"] = f"{type(exc).__name__}: {exc}"
         info["processor_ok"] = False
+
+    # Mirror the exact imports the Lightning path needs, and build the distillation
+    # scheduler for real. Two separate missing-backend failures (torchvision, then
+    # peft) both surfaced only at model-load time on a GPU; checking that the
+    # imports resolve and the scheduler constructs turns the third one into a
+    # couple of cents. Constructing the scheduler is what actually validates
+    # LIGHTNING_SCHEDULER_CONFIG, which is otherwise only exercised on an H100.
+    from diffusers import FlowMatchEulerDiscreteScheduler
+
+    try:
+        from diffusers.models import QwenImageTransformer2DModel  # noqa: F401
+
+        info["lightning_imports_ok"] = True
+    except Exception as exc:
+        info["lightning_imports_ok"] = False
+        info["lightning_imports_error"] = f"{type(exc).__name__}: {exc}"
+
+    try:
+        import peft
+
+        info["peft"] = str(peft.__version__)
+        info["lora_backend_ok"] = True
+    except Exception as exc:
+        info["peft"] = f"{type(exc).__name__}: {exc}"
+        info["lora_backend_ok"] = False
+
+    try:
+        sched = FlowMatchEulerDiscreteScheduler.from_config(LIGHTNING_SCHEDULER_CONFIG)
+        info["lightning_scheduler"] = type(sched).__name__
+        info["lightning_scheduler_ok"] = True
+    except Exception as exc:
+        info["lightning_scheduler"] = f"{type(exc).__name__}: {exc}"
+        info["lightning_scheduler_ok"] = False
 
     print("[image-editor] env: " + json.dumps(info, indent=2))
     return json.dumps(info)
