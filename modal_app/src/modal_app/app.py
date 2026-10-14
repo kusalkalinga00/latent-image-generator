@@ -66,6 +66,10 @@ gpu_image = (
     .apt_install("git")
     .uv_pip_install(
         "torch",
+        # Not optional: the pipeline's Qwen2VL video/image processor imports
+        # Torchvision, and without it the model fails to load. It is the wheel
+        # that is easiest to forget because nothing at import time asks for it.
+        "torchvision",
         # Qwen's README says "install the latest diffusers from git". That was
         # true on release day; 0.41.0 (2026-10-06) ships
         # QwenImageEditPlusPipeline, so a pinned release works and the build is
@@ -123,32 +127,56 @@ def _ui_secrets() -> list[modal.Secret]:
 # --------------------------------------------------------------------------- #
 
 
-@app.function(image=gpu_image, timeout=900)
+@app.function(image=gpu_image, volumes={"/models": weights}, timeout=900, cpu=2)
 def check_env() -> str:
-    """Prove the dependency set can import the pipeline before paying for a GPU.
+    """Prove the dependency set can load the pipeline's front end, before paying for a GPU.
 
-    An image build is slow and an H100 container is expensive; this runs the
-    risky part of initialization on a CPU container for fractions of a cent.
+    An image build is slow and an H100 container is expensive; this runs the risky
+    part of initialization on a CPU container for fractions of a cent.
+
+    It loads the **processor**, not just the modules, and that distinction cost a
+    wasted H100 container to learn. The first version only imported diffusers,
+    transformers and torch and reported everything healthy - while the real load
+    died on
+
+        ImportError: Qwen2VLVideoProcessor requires the Torchvision library
+
+    because the processor pulls torchvision in lazily, at model-load time, on a
+    GPU. Importing a library does not exercise it. The processor is small (config
+    and tokenizer, not the 40 GB transformer) so loading it here is cheap, and the
+    Volume is mounted so it is a cache hit rather than a download.
 
     Returns a JSON *string*, and coerces every field to a plain str/bool. Modal
     unpickles the return value in the **local** environment, which has no torch,
     so handing back anything carrying a torch-defined class fails with a
     misleading "the 'torch' module is not available in the local environment".
-    Version attributes are the trap: some are str subclasses defined inside torch.
     """
     import json
 
     import diffusers
-    import transformers
     import torch
+    import torchvision
+    import transformers
 
     info = {
         "torch": str(torch.__version__),
+        "torchvision": str(torchvision.__version__),
         "diffusers": str(diffusers.__version__),
         "transformers": str(transformers.__version__),
         "has_qwen_image_edit_plus": bool(hasattr(diffusers, "QwenImageEditPlusPipeline")),
         "cuda_available_on_cpu_container": bool(torch.cuda.is_available()),
     }
+
+    try:
+        from transformers import AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(MODEL_ID)
+        info["processor"] = type(processor).__name__
+        info["processor_ok"] = True
+    except Exception as exc:
+        info["processor"] = f"{type(exc).__name__}: {exc}"
+        info["processor_ok"] = False
+
     print("[image-editor] env: " + json.dumps(info, indent=2))
     return json.dumps(info)
 
