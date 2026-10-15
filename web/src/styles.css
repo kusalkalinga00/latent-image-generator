@@ -45,13 +45,13 @@
   --surface-solid: #0f172a;
   --line: rgba(226, 232, 240, 0.14);
   --header-bg: rgba(11, 18, 32, 0.62);
-  --danger-bg: rgba(127, 29, 29, 0.32);
+  --danger-bg: #3f1d24;
   --danger-ink: #fecaca;
   --danger-line: rgba(248, 113, 113, 0.4);
-  --ok-bg: rgba(20, 83, 45, 0.45);
+  --ok-bg: #14301f;
   --ok-ink: #bbf7d0;
   --ok-line: rgba(74, 222, 128, 0.4);
-  --info-bg: rgba(15, 23, 42, 0.92);
+  --info-bg: #172033;
   --info-ink: #f1f5f9;
   --info-line: rgba(226, 232, 240, 0.18);
   --glow-a: rgba(71, 85, 105, 0.75);
@@ -78,13 +78,13 @@
     --surface-solid: #0f172a;
     --line: rgba(226, 232, 240, 0.14);
     --header-bg: rgba(11, 18, 32, 0.62);
-    --danger-bg: rgba(127, 29, 29, 0.32);
+    --danger-bg: #3f1d24;
     --danger-ink: #fecaca;
     --danger-line: rgba(248, 113, 113, 0.4);
-    --ok-bg: rgba(20, 83, 45, 0.45);
+    --ok-bg: #14301f;
     --ok-ink: #bbf7d0;
     --ok-line: rgba(74, 222, 128, 0.4);
-    --info-bg: rgba(15, 23, 42, 0.92);
+    --info-bg: #172033;
     --info-ink: #f1f5f9;
     --info-line: rgba(226, 232, 240, 0.18);
     --glow-a: rgba(71, 85, 105, 0.75);
@@ -620,8 +620,8 @@ input[type="range"] {
 .toaster {
   position: fixed;
   z-index: 70;
+  top: 4.25rem;
   right: 1rem;
-  bottom: 1rem;
   display: flex;
   width: min(22rem, calc(100% - 2rem));
   flex-direction: column;
@@ -880,7 +880,7 @@ input[type="range"] {
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(-10px);
   }
   to {
     opacity: 1;
