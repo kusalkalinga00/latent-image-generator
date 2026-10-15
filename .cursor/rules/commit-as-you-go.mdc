@@ -1,0 +1,14 @@
+---
+description: Commit completed changes as soon as they are ready
+alwaysApply: true
+---
+
+# Commit as you go
+
+When you change this project, commit as soon as a coherent unit of work is done. Do not wait for a separate request to commit.
+
+- Commit after the change is complete and checked (tests, lint, or the relevant verification).
+- Prefer small commits that each do one thing over one large commit at the end.
+- Write a concise message that says why the change was made.
+- Follow the git safety protocol: no force push, no skipped hooks, no git config changes, and no secrets.
+- Push only when asked.
