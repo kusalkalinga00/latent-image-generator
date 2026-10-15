@@ -271,6 +271,37 @@ input[type="range"] {
   color: var(--ink);
 }
 
+.skeleton {
+  display: block;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ink) 12%, transparent);
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+
+.skeleton-label {
+  width: 7.5rem;
+  height: 0.7rem;
+}
+
+.skeleton-amount {
+  width: 5.5rem;
+  height: 0.9rem;
+}
+
+.skeleton-meter {
+  height: 0.45rem;
+}
+
+.skeleton-caption {
+  width: 4.25rem;
+  height: 0.65rem;
+}
+
+.skeleton-badge {
+  width: 9.5rem;
+  height: 1.75rem;
+}
+
 .work-grid {
   display: grid;
   align-items: stretch;
@@ -917,6 +948,16 @@ input[type="range"] {
   }
 }
 
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -931,6 +972,7 @@ input[type="range"] {
 @media (prefers-reduced-motion: reduce) {
   .rise,
   .toast,
+  .skeleton,
   .btn-primary,
   .btn-quiet,
   .chip,

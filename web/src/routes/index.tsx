@@ -123,6 +123,30 @@ function CreditCard({ credit }: { credit: CreditView }) {
   )
 }
 
+function CreditSkeleton() {
+  return (
+    <section
+      className="credit-card"
+      aria-busy="true"
+      aria-label="Loading monthly credit"
+    >
+      <div className="credit-head">
+        <span className="skeleton skeleton-label" />
+        <span className="skeleton skeleton-amount" />
+      </div>
+      <span className="skeleton skeleton-meter" />
+      <div className="credit-scale">
+        <span className="skeleton skeleton-caption" />
+        <span className="skeleton skeleton-caption" />
+      </div>
+      <div className="credit-badges">
+        <span className="skeleton skeleton-badge" />
+        <span className="skeleton skeleton-badge" />
+      </div>
+    </section>
+  )
+}
+
 function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [prompt, setPrompt] = useState('')
@@ -285,7 +309,11 @@ function App() {
   return (
     <main className="studio-page">
       <div className="studio">
-        {credit?.ok && <CreditCard credit={credit} />}
+        {credit === null ? (
+          <CreditSkeleton />
+        ) : (
+          credit.ok && <CreditCard credit={credit} />
+        )}
 
         <div className="work-grid">
           {/* ---------------- 1 + 2 · input ---------------- */}
