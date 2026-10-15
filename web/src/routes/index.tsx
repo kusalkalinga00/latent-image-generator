@@ -1,5 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CreditView } from '#/lib/credit'
+import { getCredit } from '#/lib/credit'
 import { editImage } from '#/lib/edit'
 import { pushToast } from '#/lib/toast'
 
@@ -70,6 +72,27 @@ async function prepareImage(file: File): Promise<Attachment> {
   }
 }
 
+function creditCopy(credit: CreditView) {
+  const grant = (credit.allowanceUsd ?? 30).toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  })
+  const left = (credit.remainingUsd ?? 0).toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+  })
+  if ((credit.remainingUsd ?? 0) <= 0) {
+    return `The ${grant} monthly credit is used up.`
+  }
+  const cold = (credit.coldEdits ?? 0).toLocaleString('en-US')
+  const warm = (credit.warmEdits ?? 0).toLocaleString('en-US')
+  if ((credit.coldEdits ?? 0) === 0) {
+    return `${left} of the ${grant} monthly credit is left. About ${warm} more edits while the GPU is already warm.`
+  }
+  return `${left} of the ${grant} monthly credit is left. About ${cold} edits if each one starts cold, or about ${warm} while the GPU stays warm.`
+}
+
 function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [prompt, setPrompt] = useState('')
@@ -84,12 +107,23 @@ function App() {
   const [resultMeta, setResultMeta] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
+  const [credit, setCredit] = useState<CreditView | null>(null)
 
   const inputRef = useRef<HTMLInputElement>(null)
 
   // The first run of a session loads 53.76 GiB into VRAM, which takes about 30s
   // before a single denoising step happens. A bare spinner for that reads as
   // broken, so elapsed time stays on screen and the copy says what is happening.
+  useEffect(() => {
+    let cancelled = false
+    void getCredit().then((next) => {
+      if (!cancelled) setCredit(next)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useEffect(() => {
     if (status !== 'running') return
     setElapsed(0)
@@ -228,6 +262,7 @@ function App() {
             The first edit of a session takes about half a minute while the
             model loads. After that, each one takes a few seconds.
           </p>
+          {credit?.ok && <p className="credit-line">{creditCopy(credit)}</p>}
         </div>
 
         <div className="work-grid">
