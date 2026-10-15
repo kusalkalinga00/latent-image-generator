@@ -160,24 +160,24 @@ function App() {
     a.click()
   }
 
-  return (
-    <main className="page-wrap py-6 sm:py-10">
-      <section className="mb-6 max-w-2xl sm:mb-8">
-        <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--ink-soft)]">
-          Qwen-Image-Edit
-        </p>
-        <h1 className="text-2xl font-medium tracking-tight text-[var(--ink)] sm:text-3xl">
-          Edit a photo by describing the change
-        </h1>
-        <p className="mt-2 text-sm leading-6 text-[var(--ink-soft)] sm:text-[15px]">
-          The first edit of a session takes about half a minute while the model loads.
-          After that, edits take a few seconds.
-        </p>
-      </section>
+  const preview = attachments[0]?.previewUrl ?? ''
+  const stageImage = status === 'done' && resultUrl ? resultUrl : preview
+  const stageLabel = status === 'done' && resultUrl ? 'Edited' : preview ? 'Original' : ''
 
-      <div className="grid items-start gap-4 lg:grid-cols-2 lg:gap-6">
+  return (
+    <main className="studio-page">
+      <div className="studio">
+        <div className="studio-copy rise">
+          <p className="kicker">Studio</p>
+          <h1 className="display">Edit a photo by describing the change</h1>
+          <p className="lede">
+            The first edit of a session takes about half a minute while the model loads.
+            After that, each one takes a few seconds.
+          </p>
+        </div>
+
         <section
-          className="panel rounded-xl p-4 sm:p-5"
+          className="stage-wrap rise"
           onDragOver={(e) => {
             e.preventDefault()
             setDragging(true)
@@ -189,82 +189,90 @@ function App() {
             void addFiles(e.dataTransfer.files)
           }}
         >
-          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-            Image{attachments.length ? ` · ${attachments.length}/${MAX_IMAGES}` : ''}
-          </h2>
+          <div className={`stage-frame${dragging ? ' is-hot' : ''}${stageImage ? '' : ' is-empty'}`}>
+            {stageImage ? (
+              <img
+                src={stageImage}
+                alt={status === 'done' ? 'Edited result' : attachments[0]?.name ?? 'Selected image'}
+                className="stage-image"
+              />
+            ) : (
+              <button type="button" className="stage-empty" onClick={() => inputRef.current?.click()}>
+                <span className="text-sm font-medium">Drop a photo here, or tap to choose</span>
+                <span className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
+                  Up to {MAX_IMAGES} images. Add more than one to combine subjects.
+                </span>
+              </button>
+            )}
 
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            disabled={attachments.length >= MAX_IMAGES}
-            className={`mb-3 flex min-h-32 w-full flex-col items-center justify-center rounded-lg border border-dashed px-4 py-6 text-center transition ${
-              dragging
-                ? 'border-[var(--ink)] bg-[var(--surface-muted)]'
-                : 'border-[var(--line)] bg-[var(--surface-muted)] hover:border-[var(--ink-soft)]'
-            } disabled:cursor-not-allowed disabled:opacity-50`}
-          >
-            <span className="text-sm font-medium text-[var(--ink)]">
-              {attachments.length >= MAX_IMAGES
-                ? `That is all ${MAX_IMAGES} images`
-                : 'Drop images here or tap to choose'}
-            </span>
-            <span className="mt-1 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-              Up to {MAX_IMAGES}. Add more than one to combine or compare subjects.
-            </span>
-          </button>
+            {stageLabel && status !== 'running' && <span className="stage-badge">{stageLabel}</span>}
 
-          <input
-            ref={inputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={(e) => {
-              if (e.target.files) void addFiles(e.target.files)
-              e.target.value = ''
-            }}
-          />
+            {status === 'running' && (
+              <div className="stage-veil">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--ink)]" />
+                <p className="text-sm font-medium text-[var(--ink)]">Working — {elapsed.toFixed(1)}s</p>
+                <p className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
+                  {elapsed < 30
+                    ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
+                    : 'The GPU is running. The edit itself takes a few seconds.'}
+                </p>
+              </div>
+            )}
 
-          {attachments.length > 0 && (
-            <ul className="mb-5 grid grid-cols-3 gap-2">
-              {attachments.map((a) => (
-                <li
-                  key={a.id}
-                  className="relative overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface-muted)]"
+            {status === 'done' && resultUrl && (
+              <div className="stage-toolbar">
+                <span className="rounded-full bg-slate-950/55 px-3 py-1 text-[11px] text-white backdrop-blur-sm">
+                  {resultMeta}
+                </span>
+                <button type="button" onClick={download} className="btn-quiet h-9 px-3 text-xs font-medium">
+                  Download PNG
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="filmstrip">
+            {attachments.map((a) => (
+              <div key={a.id} className="film-card">
+                <img src={a.previewUrl} alt={a.name} />
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(a.id)}
+                  aria-label={`Remove ${a.name}`}
+                  className="film-remove"
                 >
-                  <img src={a.previewUrl} alt={a.name} className="aspect-square w-full object-cover sm:h-28 sm:aspect-auto" />
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(a.id)}
-                    aria-label={`Remove ${a.name}`}
-                    className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-md bg-slate-950/75 text-sm text-white"
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+                  ×
+                </button>
+              </div>
+            ))}
+            {attachments.length < MAX_IMAGES && (
+              <button
+                type="button"
+                className="film-add btn-quiet"
+                onClick={() => inputRef.current?.click()}
+                aria-label="Add an image"
+              >
+                +
+              </button>
+            )}
+          </div>
+        </section>
 
-          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-            Prompt
+        <aside className="command rise rise-late">
+          <h2 className="m-0 mb-3 text-sm font-medium tracking-tight text-[var(--ink)]">
+            What should change?
           </h2>
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={4}
             placeholder="Make the sky a dramatic sunset and keep the subject unchanged"
-            className="mb-3 w-full resize-y rounded-lg border border-[var(--line)] bg-[var(--surface-muted)] px-3 py-3 text-sm leading-6 text-[var(--ink)] outline-none transition placeholder:text-[var(--ink-soft)] focus:border-[var(--ink-soft)]"
+            className="field mb-2"
           />
 
-          <div className="mb-4 flex flex-col gap-2">
+          <div className="mb-3 flex flex-col">
             {EXAMPLES.map((example) => (
-              <button
-                key={example}
-                type="button"
-                onClick={() => setPrompt(example)}
-                className="rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-2.5 text-left text-xs leading-5 text-[var(--ink)] transition hover:bg-[var(--surface-muted)]"
-              >
+              <button key={example} type="button" onClick={() => setPrompt(example)} className="chip">
                 {example}
               </button>
             ))}
@@ -280,7 +288,7 @@ function App() {
           </button>
 
           {showAdvanced && (
-            <div className="mb-4 grid gap-4 rounded-lg border border-[var(--line)] bg-[var(--surface-muted)] p-4 sm:grid-cols-2">
+            <div className="mb-4 grid gap-4 rounded-xl border border-[var(--line)] bg-[var(--surface-solid)]/50 p-4">
               <label className="text-xs font-medium text-[var(--ink-soft)]">
                 Steps: {steps}
                 <input
@@ -302,7 +310,7 @@ function App() {
                   type="number"
                   value={seed}
                   onChange={(e) => setSeed(Number(e.target.value))}
-                  className="mt-2 h-10 w-full rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 text-sm text-[var(--ink)] outline-none focus:border-[var(--ink-soft)]"
+                  className="field mt-2 h-10"
                 />
                 <span className="mt-1 block font-normal leading-5">
                   Same seed and input gives the same result.
@@ -315,73 +323,34 @@ function App() {
             type="button"
             onClick={() => void run()}
             disabled={status === 'running'}
-            className="h-11 w-full rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-[var(--accent-ink)] transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            className="btn-primary"
           >
-            {status === 'running' ? `Editing… ${elapsed.toFixed(1)}s` : 'Edit image'}
+            <span>{status === 'running' ? `Editing… ${elapsed.toFixed(1)}s` : 'Edit image'}</span>
+            {status !== 'running' && <span className="arrow" aria-hidden="true">→</span>}
           </button>
 
           {error && (
             <p
               role="alert"
-              className="mt-4 rounded-lg border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-3 text-sm leading-6 text-[var(--danger-ink)]"
+              className="mt-3 rounded-xl border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-3 text-sm leading-6 text-[var(--danger-ink)]"
             >
               {error}
             </p>
           )}
-        </section>
-
-        <section className="panel rounded-xl p-4 sm:p-5">
-          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.14em] text-[var(--ink-soft)]">
-            Result
-          </h2>
-
-          {status === 'running' && (
-            <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-10 text-center sm:min-h-80">
-              <div className="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--ink)]" />
-              <p className="text-sm font-medium text-[var(--ink)]">
-                Working — {elapsed.toFixed(1)}s
-              </p>
-              <p className="mt-1 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-                {elapsed < 30
-                  ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
-                  : 'The GPU is running now. Edits themselves take a few seconds.'}
-              </p>
-            </div>
-          )}
-
-          {status === 'idle' && (
-            <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-10 text-center sm:min-h-80">
-              <p className="text-sm text-[var(--ink-soft)]">The edited image will appear here.</p>
-            </div>
-          )}
-
-          {status === 'error' && !resultUrl && (
-            <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-10 text-center sm:min-h-80">
-              <p className="text-sm text-[var(--ink-soft)]">The edit did not finish. Adjust the prompt and try again.</p>
-            </div>
-          )}
-
-          {status === 'done' && resultUrl && (
-            <>
-              <img
-                src={resultUrl}
-                alt="Edited result"
-                className="mb-3 max-h-[70vh] w-full rounded-lg border border-[var(--line)] bg-[var(--surface-muted)] object-contain"
-              />
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-xs text-[var(--ink-soft)]">{resultMeta}</p>
-                <button
-                  type="button"
-                  onClick={download}
-                  className="h-10 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-4 text-xs font-medium text-[var(--ink)] transition hover:bg-[var(--surface-muted)] sm:w-auto"
-                >
-                  Download PNG
-                </button>
-              </div>
-            </>
-          )}
-        </section>
+        </aside>
       </div>
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(e) => {
+          if (e.target.files) void addFiles(e.target.files)
+          e.target.value = ''
+        }}
+      />
     </main>
   )
 }
