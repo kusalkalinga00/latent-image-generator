@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import io
 import math
+from decimal import Decimal
 from typing import Any
 
 import modal
@@ -410,6 +411,74 @@ def _run_edit(
 
 
 # --------------------------------------------------------------------------- #
+# Credit left this month
+# --------------------------------------------------------------------------- #
+
+# Starter plan compute grant. The billing summary reports only the portion
+# already applied, so the remainder is this grant minus that amount.
+MONTHLY_CREDIT_USD = Decimal("30")
+# Measured on an H100 for a 896x1184 image. See the README cost table.
+COLD_LOAD_SECONDS = Decimal("31.7")
+WARM_EDIT_SECONDS = Decimal("3.61")
+# scaledown_window on Editor: the GPU stays up this long after the last edit.
+IDLE_SECONDS = Decimal("60")
+
+
+def _adjustment(summary: Any, name: str) -> Decimal:
+    for key, value in summary.adjustments.items():
+        if str(key).lower() == name:
+            return Decimal(value)
+    return Decimal(0)
+
+
+def estimate_edits(remaining: Decimal, h100_hour: Decimal) -> tuple[int, int]:
+    """How many 4-step edits the remaining credit covers.
+
+    A cold edit pays the weight load, the edit, and the idle minute before the
+    GPU shuts down. Further edits in the same sitting pay only the edit itself;
+    the load and the trailing minute are paid once.
+    """
+    if remaining <= 0 or h100_hour <= 0:
+        return 0, 0
+
+    per_second = h100_hour / Decimal(3600)
+    cold_cost = (COLD_LOAD_SECONDS + WARM_EDIT_SECONDS + IDLE_SECONDS) * per_second
+    warm_cost = WARM_EDIT_SECONDS * per_second
+    fixed_cost = (COLD_LOAD_SECONDS + IDLE_SECONDS) * per_second
+    cold_edits = int(remaining // cold_cost) if cold_cost > 0 else 0
+    warm_edits = (
+        int((remaining - fixed_cost) // warm_cost)
+        if warm_cost > 0 and remaining > fixed_cost
+        else 0
+    )
+    return cold_edits, warm_edits
+
+
+def credit_snapshot() -> dict[str, Any]:
+    """Remaining Starter credit, and the edits it still covers."""
+    workspace = modal.Workspace.from_context()
+    summary = workspace.billing.summary()
+    rates = workspace.billing.rates()
+    applied = abs(_adjustment(summary, "credits"))
+    billed = Decimal(summary.billed_cost)
+    remaining = (
+        Decimal(0)
+        if billed > 0
+        else max(Decimal(0), MONTHLY_CREDIT_USD - applied)
+    )
+    cold_edits, warm_edits = estimate_edits(
+        remaining, Decimal(rates["gpu_hour_cost_h100"])
+    )
+    return {
+        "ok": True,
+        "allowance_usd": float(MONTHLY_CREDIT_USD),
+        "remaining_usd": float(round(remaining, 2)),
+        "cold_edits": cold_edits,
+        "warm_edits": warm_edits,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # JSON API - called by the Vercel app's server, never by a browser
 # --------------------------------------------------------------------------- #
 
@@ -468,6 +537,17 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         "steps": out["steps"],
         "size": out["size"],
     }
+
+
+@app.function(image=api_image, timeout=60)
+@modal.fastapi_endpoint(method="GET", requires_proxy_auth=True)
+def usage() -> dict[str, Any]:
+    """This month's remaining credit. CPU only — it never starts a GPU."""
+    try:
+        return credit_snapshot()
+    except Exception as exc:
+        print(f"[image-editor] credit snapshot failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "error": "Credit balance is unavailable."}
 
 
 @app.local_entrypoint()
