@@ -83,8 +83,7 @@ function CreditCard({ credit }: { credit: CreditView }) {
   const allowance = credit.allowanceUsd ?? 30
   const remaining = Math.max(0, credit.remainingUsd ?? 0)
   const used = Math.max(0, allowance - remaining)
-  const leftPct =
-    allowance > 0 ? Math.min(100, (remaining / allowance) * 100) : 0
+  const usedPct = allowance > 0 ? Math.min(100, (used / allowance) * 100) : 0
   const cold = (credit.coldEdits ?? 0).toLocaleString('en-US')
   const warm = (credit.warmEdits ?? 0).toLocaleString('en-US')
 
@@ -99,10 +98,10 @@ function CreditCard({ credit }: { credit: CreditView }) {
         role="meter"
         aria-valuemin={0}
         aria-valuemax={Math.round(allowance * 100)}
-        aria-valuenow={Math.round(remaining * 100)}
-        aria-label={`${money(remaining)} of ${money(allowance)} left`}
+        aria-valuenow={Math.round(used * 100)}
+        aria-label={`${money(used)} of ${money(allowance)} used`}
       >
-        <span style={{ width: `${leftPct}%` }} />
+        <span style={{ width: `${usedPct}%` }} />
       </div>
       <p className="credit-scale">
         <span>{money(used)} used</span>
