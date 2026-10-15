@@ -194,16 +194,81 @@ input[type="range"] {
   gap: 1.75rem;
 }
 
-.studio-copy {
-  text-align: center;
+.credit-card {
+  display: grid;
+  gap: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 1.25rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22), transparent 42%),
+    var(--surface);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(18px);
+  padding: 1rem 1.15rem 1.05rem;
 }
 
-.credit-line {
-  margin: 0.85rem auto 0;
-  max-width: 38rem;
-  font-size: 0.8rem;
-  line-height: 1.55;
+.credit-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.credit-left {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.credit-meter {
+  height: 0.45rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ink) 12%, transparent);
+}
+
+.credit-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--ink-soft), var(--ink));
+}
+
+.credit-scale {
+  display: flex;
+  justify-content: space-between;
+  margin: -0.2rem 0 0;
+  font-size: 0.72rem;
   color: var(--ink-soft);
+}
+
+.credit-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.credit-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface-solid) 72%, transparent);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.credit-badge strong {
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
 }
 
 .work-grid {
@@ -519,39 +584,6 @@ input[type="range"] {
   background: linear-gradient(90deg, transparent, var(--ink), transparent);
   background-size: 200% 100%;
   animation: meter-slide 1.6s ease-in-out infinite;
-}
-
-.kicker {
-  margin: 0 0 0.7rem;
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-}
-
-.display {
-  margin: 0 auto;
-  max-width: none;
-  text-align: center;
-  text-wrap: balance;
-  font-size: clamp(2rem, 4.4vw, 3.35rem);
-  font-weight: 500;
-  line-height: 1.02;
-  letter-spacing: -0.035em;
-  background: linear-gradient(115deg, var(--ink) 10%, #64748b 90%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.lede {
-  margin: 0.9rem auto 0;
-  max-width: 36rem;
-  text-align: center;
-  font-size: 0.95rem;
-  line-height: 1.6;
-  color: var(--ink-soft);
 }
 
 .field {

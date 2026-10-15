@@ -72,25 +72,56 @@ async function prepareImage(file: File): Promise<Attachment> {
   }
 }
 
-function creditCopy(credit: CreditView) {
-  const grant = (credit.allowanceUsd ?? 30).toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 0,
-  })
-  const left = (credit.remainingUsd ?? 0).toLocaleString('en-US', {
+function money(amount: number) {
+  return amount.toLocaleString('en-US', {
     style: 'currency',
     currency: 'USD',
   })
-  if ((credit.remainingUsd ?? 0) <= 0) {
-    return `The ${grant} monthly credit is used up.`
-  }
+}
+
+function CreditCard({ credit }: { credit: CreditView }) {
+  const allowance = credit.allowanceUsd ?? 30
+  const remaining = Math.max(0, credit.remainingUsd ?? 0)
+  const used = Math.max(0, allowance - remaining)
+  const leftPct =
+    allowance > 0 ? Math.min(100, (remaining / allowance) * 100) : 0
   const cold = (credit.coldEdits ?? 0).toLocaleString('en-US')
   const warm = (credit.warmEdits ?? 0).toLocaleString('en-US')
-  if ((credit.coldEdits ?? 0) === 0) {
-    return `${left} of the ${grant} monthly credit is left. About ${warm} more edits while the GPU is already warm.`
-  }
-  return `${left} of the ${grant} monthly credit is left. About ${cold} edits if each one starts cold, or about ${warm} while the GPU stays warm.`
+
+  return (
+    <section className="credit-card rise" aria-label="Monthly credit">
+      <div className="credit-head">
+        <p className="step-label">Monthly credit</p>
+        <p className="credit-left">{money(remaining)} left</p>
+      </div>
+      <div
+        className="credit-meter"
+        role="meter"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(allowance * 100)}
+        aria-valuenow={Math.round(remaining * 100)}
+        aria-label={`${money(remaining)} of ${money(allowance)} left`}
+      >
+        <span style={{ width: `${leftPct}%` }} />
+      </div>
+      <p className="credit-scale">
+        <span>{money(used)} used</span>
+        <span>{money(allowance)}</span>
+      </p>
+      <div className="credit-badges">
+        <p className="credit-badge">
+          <span>Cold start</span>
+          <strong>{cold}</strong>
+          <span>edits</span>
+        </p>
+        <p className="credit-badge">
+          <span>GPU warm</span>
+          <strong>{warm}</strong>
+          <span>edits</span>
+        </p>
+      </div>
+    </section>
+  )
 }
 
 function App() {
@@ -255,15 +286,7 @@ function App() {
   return (
     <main className="studio-page">
       <div className="studio">
-        <div className="studio-copy rise">
-          <p className="kicker">Studio</p>
-          <h1 className="display">Edit a photo by describing the change</h1>
-          <p className="lede">
-            The first edit of a session takes about half a minute while the
-            model loads. After that, each one takes a few seconds.
-          </p>
-          {credit?.ok && <p className="credit-line">{creditCopy(credit)}</p>}
-        </div>
+        {credit?.ok && <CreditCard credit={credit} />}
 
         <div className="work-grid">
           {/* ---------------- 1 + 2 · input ---------------- */}
