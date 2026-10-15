@@ -19,7 +19,7 @@ interface CreditBody {
 function usageUrl(apiUrl: string) {
   const override = process.env.IMAGE_EDITOR_USAGE_URL
   if (override) return override
-  const derived = apiUrl.replace(/-api(\.modal\.run\/?)$/, '-usage$1')
+  const derived = apiUrl.replace(/-api(?=\.)/, '-usage')
   return derived === apiUrl ? '' : derived
 }
 
