@@ -197,6 +197,7 @@ input[type="range"] {
 .credit-card {
   display: grid;
   gap: 0.7rem;
+  margin-top: 1.15rem;
   border: 1px solid var(--line);
   border-radius: 1.25rem;
   background:
