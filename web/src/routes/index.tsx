@@ -161,8 +161,15 @@ function App() {
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
-  const stageImage = status === 'done' && resultUrl ? resultUrl : preview
-  const stageLabel = status === 'done' && resultUrl ? 'Edited' : preview ? 'Original' : ''
+  const full = attachments.length >= MAX_IMAGES
+  const statusLabel =
+    status === 'running'
+      ? `Developing · ${elapsed.toFixed(0)}s`
+      : status === 'done'
+        ? 'Ready'
+        : status === 'error'
+          ? 'Needs attention'
+          : 'Idle'
 
   return (
     <main className="studio-page">
@@ -176,170 +183,226 @@ function App() {
           </p>
         </div>
 
-        <div className="panels">
-        <div className="stage-column">
-        <section
-          className="stage-wrap rise"
-          onDragOver={(e) => {
-            e.preventDefault()
-            setDragging(true)
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault()
-            setDragging(false)
-            void addFiles(e.dataTransfer.files)
-          }}
-        >
-          <div className={`stage-frame${dragging ? ' is-hot' : ''}${stageImage ? '' : ' is-empty'}`}>
-            {stageImage ? (
-              <img
-                src={stageImage}
-                alt={status === 'done' ? 'Edited result' : attachments[0]?.name ?? 'Selected image'}
-                className="stage-image"
-              />
-            ) : (
-              <button type="button" className="stage-empty" onClick={() => inputRef.current?.click()}>
-                <span className="text-sm font-medium">Drop a photo here, or tap to choose</span>
-                <span className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-                  Up to {MAX_IMAGES} images. Add more than one to combine subjects.
-                </span>
+        <div className="work-grid">
+          {/* ---------------- 1 + 2 · input ---------------- */}
+          <section
+            className="card rise"
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragging(true)
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setDragging(false)
+              void addFiles(e.dataTransfer.files)
+            }}
+          >
+            <h2 className="step-label">
+              1 · Your image{attachments.length ? ` (${attachments.length}/${MAX_IMAGES})` : ''}
+            </h2>
+
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              disabled={full}
+              className={`dropzone${dragging ? ' is-hot' : ''}`}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+                className="h-6 w-6 text-[var(--ink-soft)]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+              >
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <circle cx="8.5" cy="10" r="1.5" fill="currentColor" stroke="none" />
+                <path d="M21 16l-5.5-5.5L7 19" />
+              </svg>
+              <span className="text-sm font-medium text-[var(--ink)]">
+                {full
+                  ? `That is all ${MAX_IMAGES} images`
+                  : 'Drop images here or click to choose'}
+              </span>
+              <span className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
+                Up to {MAX_IMAGES}. Add more than one to combine or compare subjects.
+              </span>
+            </button>
+
+            {attachments.length > 0 && (
+              <ul className="thumbs">
+                {attachments.map((a) => (
+                  <li key={a.id} className="thumb">
+                    <img src={a.previewUrl} alt={a.name} />
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(a.id)}
+                      aria-label={`Remove ${a.name}`}
+                      className="thumb-remove"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h2 className="step-label">2 · What should change?</h2>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+              placeholder="Make the sky a dramatic sunset and keep the subject unchanged"
+              className="field"
+            />
+
+            <div className="examples">
+              {EXAMPLES.map((example) => (
+                <button
+                  key={example}
+                  type="button"
+                  onClick={() => setPrompt(example)}
+                  className="chip"
+                >
+                  {example}
+                </button>
+              ))}
+            </div>
+
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((v) => !v)}
+                className="inline-flex min-h-11 items-center text-xs font-medium text-[var(--ink-soft)] underline-offset-2 hover:text-[var(--ink)] hover:underline"
+                aria-expanded={showAdvanced}
+              >
+                {showAdvanced ? 'Hide advanced' : 'Show advanced'}
               </button>
-            )}
 
-            {stageLabel && status !== 'running' && <span className="stage-badge">{stageLabel}</span>}
+              {showAdvanced && (
+                <div className="advanced mt-2">
+                  <label className="text-xs font-medium text-[var(--ink-soft)]">
+                    Steps: {steps}
+                    <input
+                      type="range"
+                      min={4}
+                      max={20}
+                      step={1}
+                      value={steps}
+                      onChange={(e) => setSteps(Number(e.target.value))}
+                      className="mt-2 w-full"
+                    />
+                    <span className="mt-1 block font-normal leading-5">
+                      4 is the distilled default. Above 4 uses the slower standard path.
+                    </span>
+                  </label>
+                  <label className="text-xs font-medium text-[var(--ink-soft)]">
+                    Seed
+                    <input
+                      type="number"
+                      value={seed}
+                      onChange={(e) => setSeed(Number(e.target.value))}
+                      className="field mt-2 h-10"
+                    />
+                    <span className="mt-1 block font-normal leading-5">
+                      Same seed and input gives the same result.
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
 
-            {status === 'running' && (
-              <div className="stage-veil">
-                <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--ink)]" />
-                <p className="text-sm font-medium text-[var(--ink)]">Working — {elapsed.toFixed(1)}s</p>
-                <p className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-                  {elapsed < 30
-                    ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
-                    : 'The GPU is running. The edit itself takes a few seconds.'}
+            <div className="card-foot">
+              <button
+                type="button"
+                onClick={() => void run()}
+                disabled={status === 'running'}
+                className="btn-primary"
+              >
+                <span>{status === 'running' ? `Editing… ${elapsed.toFixed(1)}s` : 'Edit image'}</span>
+                {status !== 'running' && <span className="arrow" aria-hidden="true">→</span>}
+              </button>
+
+              {error && (
+                <p role="alert" className="alert">
+                  {error}
                 </p>
-              </div>
-            )}
+              )}
+            </div>
+          </section>
+
+          {/* ---------------- 3 · result ---------------- */}
+          <section className="card rise rise-late">
+            <div className="step-row">
+              <h2 className="step-label">3 · Result</h2>
+              <span className={`status-pill${status === 'running' ? ' is-busy' : ''}`}>
+                <span className="dot" aria-hidden="true" />
+                {statusLabel}
+              </span>
+            </div>
+
+            <div className={`result-stage${status === 'done' && resultUrl ? ' has-image' : ''}`}>
+              {status === 'running' ? (
+                <div className="developing">
+                  {preview && (
+                    <img src={preview} alt="" aria-hidden="true" className="develop-ghost" />
+                  )}
+                  <div className="develop-inner">
+                    <div className="develop-lights" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <p className="m-0 text-sm font-medium text-[var(--ink)]">
+                      Developing — {elapsed.toFixed(1)}s
+                    </p>
+                    <div className="develop-meter" aria-hidden="true">
+                      <i />
+                    </div>
+                    <p className="m-0 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
+                      {elapsed < 30
+                        ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
+                        : 'The GPU is hot now. Your edit is developing.'}
+                    </p>
+                  </div>
+                </div>
+              ) : status === 'done' && resultUrl ? (
+                <img src={resultUrl} alt="Edited result" className="result-img" />
+              ) : status === 'error' ? (
+                <>
+                  <span className="text-xl" aria-hidden="true">
+                    ⚠️
+                  </span>
+                  <p className="m-0 max-w-xs text-sm leading-6 text-[var(--ink-soft)]">
+                    The edit did not finish. Adjust the prompt and try again.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <span className="text-xl" aria-hidden="true">
+                    ✨
+                  </span>
+                  <p className="m-0 max-w-xs text-sm leading-6 text-[var(--ink-soft)]">
+                    Your edited image will appear here.
+                  </p>
+                </>
+              )}
+            </div>
 
             {status === 'done' && resultUrl && (
-              <div className="stage-toolbar">
-                <span className="rounded-full bg-slate-950/55 px-3 py-1 text-[11px] text-white backdrop-blur-sm">
-                  {resultMeta}
-                </span>
-                <button type="button" onClick={download} className="btn-quiet h-9 px-3 text-xs font-medium">
+              <div className="result-bar">
+                <p className="m-0 text-xs text-[var(--ink-soft)]">{resultMeta}</p>
+                <button
+                  type="button"
+                  onClick={download}
+                  className="btn-quiet h-10 px-4 text-xs font-medium"
+                >
                   Download PNG
                 </button>
               </div>
             )}
-          </div>
-        </section>
-        <div className="filmstrip">
-          {attachments.map((a) => (
-            <div key={a.id} className="film-card">
-              <img src={a.previewUrl} alt={a.name} />
-              <button
-                type="button"
-                onClick={() => removeAttachment(a.id)}
-                aria-label={`Remove ${a.name}`}
-                className="film-remove"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-          {attachments.length < MAX_IMAGES && (
-            <button
-              type="button"
-              className="film-add btn-quiet"
-              onClick={() => inputRef.current?.click()}
-              aria-label="Add an image"
-            >
-              +
-            </button>
-          )}
-        </div>
-        </div>
-
-        <aside className="command rise rise-late">
-          <h2 className="m-0 mb-3 text-sm font-medium tracking-tight text-[var(--ink)]">
-            What should change?
-          </h2>
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={4}
-            placeholder="Make the sky a dramatic sunset and keep the subject unchanged"
-            className="field mb-2"
-          />
-
-          <div className="mb-3 flex flex-col">
-            {EXAMPLES.map((example) => (
-              <button key={example} type="button" onClick={() => setPrompt(example)} className="chip">
-                {example}
-              </button>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setShowAdvanced((v) => !v)}
-            className="mb-3 inline-flex min-h-11 items-center text-xs font-medium text-[var(--ink-soft)] underline-offset-2 hover:text-[var(--ink)] hover:underline"
-            aria-expanded={showAdvanced}
-          >
-            {showAdvanced ? 'Hide advanced' : 'Show advanced'}
-          </button>
-
-          {showAdvanced && (
-            <div className="mb-4 grid gap-4 rounded-xl border border-[var(--line)] bg-[var(--surface-solid)]/50 p-4">
-              <label className="text-xs font-medium text-[var(--ink-soft)]">
-                Steps: {steps}
-                <input
-                  type="range"
-                  min={4}
-                  max={20}
-                  step={1}
-                  value={steps}
-                  onChange={(e) => setSteps(Number(e.target.value))}
-                  className="mt-2 w-full"
-                />
-                <span className="mt-1 block font-normal leading-5">
-                  4 is the distilled default. Above 4 uses the slower standard path.
-                </span>
-              </label>
-              <label className="text-xs font-medium text-[var(--ink-soft)]">
-                Seed
-                <input
-                  type="number"
-                  value={seed}
-                  onChange={(e) => setSeed(Number(e.target.value))}
-                  className="field mt-2 h-10"
-                />
-                <span className="mt-1 block font-normal leading-5">
-                  Same seed and input gives the same result.
-                </span>
-              </label>
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={() => void run()}
-            disabled={status === 'running'}
-            className="btn-primary"
-          >
-            <span>{status === 'running' ? `Editing… ${elapsed.toFixed(1)}s` : 'Edit image'}</span>
-            {status !== 'running' && <span className="arrow" aria-hidden="true">→</span>}
-          </button>
-
-          {error && (
-            <p
-              role="alert"
-              className="mt-3 rounded-xl border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-3 text-sm leading-6 text-[var(--danger-ink)]"
-            >
-              {error}
-            </p>
-          )}
-        </aside>
+          </section>
         </div>
       </div>
 
