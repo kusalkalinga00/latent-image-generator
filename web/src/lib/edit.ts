@@ -28,9 +28,46 @@ export interface EditOutput {
   error?: string
 }
 
+function failed(error: string): EditOutput {
+  return { ok: false, error }
+}
+
+function modelMessage(value: unknown) {
+  if (typeof value !== 'string') return ''
+  const message = value.trim()
+  if (!message || message.length > 180 || /traceback|exception/i.test(message))
+    return ''
+  return message
+}
+
 export const editImage = createServerFn({ method: 'POST' })
   .validator((data: EditInput) => data)
   .handler(async ({ data }): Promise<EditOutput> => {
+    if (!Array.isArray(data.imagesBase64) || data.imagesBase64.length === 0) {
+      return failed('Add at least one image.')
+    }
+    if (data.imagesBase64.length > 3) {
+      return failed('You can add up to 3 images.')
+    }
+    if (
+      data.imagesBase64.some(
+        (image) => typeof image !== 'string' || image.length === 0,
+      )
+    ) {
+      return failed(
+        'One of the images could not be read. Try a different file.',
+      )
+    }
+    if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
+      return failed('Describe the edit you want.')
+    }
+    if (!Number.isInteger(data.steps) || data.steps < 4 || data.steps > 20) {
+      return failed('Steps must be between 4 and 20.')
+    }
+    if (!Number.isFinite(data.seed)) {
+      return failed('Seed must be a number.')
+    }
+
     // Named *_PROXY_* deliberately. MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are the
     // Modal CLI's own auth variables, and these are *proxy* tokens (wk-/ws-) used
     // only for web-function auth - a different credential type entirely. Sharing
@@ -47,10 +84,11 @@ export const editImage = createServerFn({ method: 'POST' })
         !tokenId && 'MODAL_PROXY_TOKEN_ID',
         !tokenSecret && 'MODAL_PROXY_TOKEN_SECRET',
       ].filter(Boolean)
-      return {
-        ok: false,
-        error: `Server is not configured. Missing: ${missing.join(', ')}`,
-      }
+      console.error(
+        'Image editor is missing configuration:',
+        missing.join(', '),
+      )
+      return failed('The editor is not available right now.')
     }
 
     try {
@@ -73,15 +111,35 @@ export const editImage = createServerFn({ method: 'POST' })
 
       if (!response.ok) {
         // 401 here means the proxy token is wrong, not that the model failed.
-        return {
-          ok: false,
-          error: `Modal returned HTTP ${response.status}. ${text.slice(0, 300)}`,
-        }
+        console.error(
+          'Image editor request failed:',
+          response.status,
+          text.slice(0, 300),
+        )
+        return failed('The edit did not finish. Try again in a moment.')
       }
 
-      const body = JSON.parse(text)
-      if (!body.ok) {
-        return { ok: false, error: body.error ?? 'The model returned an unknown error.' }
+      let body: {
+        ok?: boolean
+        error?: unknown
+        image_b64?: string
+        seconds?: number
+        steps?: number
+      }
+      try {
+        body = JSON.parse(text)
+      } catch (error) {
+        console.error('Image editor returned invalid JSON:', error)
+        return failed('The edit did not finish. Try again in a moment.')
+      }
+
+      if (!body.ok || !body.image_b64) {
+        const detail = modelMessage(body.error)
+        if (!detail && body.error)
+          console.error('Image editor model error:', body.error)
+        return failed(
+          detail || 'The edit did not finish. Try again in a moment.',
+        )
       }
 
       return {
@@ -91,7 +149,7 @@ export const editImage = createServerFn({ method: 'POST' })
         steps: body.steps,
       }
     } catch (error) {
-      const err = error as Error
-      return { ok: false, error: `${err.name}: ${err.message}` }
+      console.error('Image editor request failed:', error)
+      return failed('Could not reach the editor. Try again in a moment.')
     }
   })
