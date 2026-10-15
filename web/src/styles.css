@@ -506,8 +506,9 @@ input[type="range"] {
 
 .display {
   margin: 0 auto;
-  max-width: 16ch;
+  max-width: none;
   text-align: center;
+  text-wrap: balance;
   font-size: clamp(2rem, 4.4vw, 3.35rem);
   font-weight: 500;
   line-height: 1.02;
