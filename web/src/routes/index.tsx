@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { editImage } from '#/lib/edit'
+import { pushToast } from '#/lib/toast'
 
 export const Route = createFileRoute('/')({ component: App })
 
@@ -36,7 +37,13 @@ async function prepareImage(file: File): Promise<Attachment> {
     )
   }
 
-  const bitmap = await createImageBitmap(file)
+  let bitmap: ImageBitmap
+  try {
+    bitmap = await createImageBitmap(file)
+  } catch {
+    throw new Error(`${file.name} could not be read. Try a different image.`)
+  }
+
   const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height))
   const width = Math.max(1, Math.round(bitmap.width * scale))
   const height = Math.max(1, Math.round(bitmap.height * scale))
@@ -52,11 +59,14 @@ async function prepareImage(file: File): Promise<Attachment> {
   bitmap.close()
 
   const dataUrl = canvas.toDataURL('image/png')
+  const base64 = dataUrl.split(',')[1] ?? ''
+  if (!base64) throw new Error(`${file.name} could not be prepared.`)
+
   return {
     id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: file.name,
     previewUrl: dataUrl,
-    base64: dataUrl.split(',')[1] ?? '',
+    base64,
   }
 }
 
@@ -67,10 +77,11 @@ function App() {
   const [seed, setSeed] = useState(0)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
-  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>(
+    'idle',
+  )
   const [resultUrl, setResultUrl] = useState('')
   const [resultMeta, setResultMeta] = useState('')
-  const [error, setError] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
 
@@ -89,21 +100,48 @@ function App() {
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
-      setError('')
-      const incoming = Array.from(files).filter((f) => f.type.startsWith('image/'))
-      if (incoming.length === 0) return
+      const list = Array.from(files)
+      if (list.length === 0) return
+
+      const incoming = list.filter((file) => file.type.startsWith('image/'))
+      if (incoming.length === 0) {
+        pushToast('error', 'Choose an image file.')
+        return
+      }
+      if (incoming.length < list.length) {
+        pushToast('info', 'Skipped files that are not images.')
+      }
 
       const room = MAX_IMAGES - attachments.length
       if (room <= 0) {
-        setError(`Up to ${MAX_IMAGES} images. Remove one first.`)
+        pushToast(
+          'error',
+          `You can add up to ${MAX_IMAGES} images. Remove one first.`,
+        )
         return
       }
 
-      try {
-        const prepared = await Promise.all(incoming.slice(0, room).map(prepareImage))
+      const accepted = incoming.slice(0, room)
+      const prepared: Attachment[] = []
+      for (const file of accepted) {
+        try {
+          prepared.push(await prepareImage(file))
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : 'Could not read that image.'
+          pushToast('error', message)
+        }
+      }
+
+      if (prepared.length > 0) {
         setAttachments((prev) => [...prev, ...prepared].slice(0, MAX_IMAGES))
-      } catch (err) {
-        setError((err as Error).message)
+      }
+      if (incoming.length > room) {
+        const noun = room === 1 ? 'image fits' : 'images fit'
+        pushToast(
+          'info',
+          `Only ${room} more ${noun}. The limit is ${MAX_IMAGES}.`,
+        )
       }
     },
     [attachments.length],
@@ -114,16 +152,15 @@ function App() {
 
   const run = async () => {
     if (attachments.length === 0) {
-      setError('Add at least one image.')
+      pushToast('error', 'Add at least one image.')
       return
     }
     if (!prompt.trim()) {
-      setError('Describe the edit you want.')
+      pushToast('error', 'Describe the edit you want.')
       return
     }
 
     setStatus('running')
-    setError('')
     setResultUrl('')
     setResultMeta('')
 
@@ -138,7 +175,7 @@ function App() {
       })
 
       if (!out.ok || !out.imageBase64) {
-        setError(out.error ?? 'Something went wrong.')
+        pushToast('error', out.error ?? 'The edit did not finish. Try again.')
         setStatus('error')
         return
       }
@@ -146,8 +183,17 @@ function App() {
       setResultUrl(`data:image/png;base64,${out.imageBase64}`)
       setResultMeta(`${out.seconds}s on the GPU · ${out.steps} steps`)
       setStatus('done')
+      pushToast(
+        'success',
+        out.seconds ? `Edit ready in ${out.seconds}s.` : 'Edit ready.',
+      )
     } catch (err) {
-      setError((err as Error).message)
+      const message =
+        err instanceof Error ? err.message : 'The edit did not finish.'
+      const friendly = /fetch|network|load failed/i.test(message)
+        ? 'Could not reach the editor. Try again in a moment.'
+        : message
+      pushToast('error', friendly)
       setStatus('error')
     }
   }
@@ -158,233 +204,294 @@ function App() {
     a.href = resultUrl
     a.download = `edited-${Date.now()}.png`
     a.click()
+    pushToast('success', 'Download started.')
   }
 
+  const preview = attachments[0]?.previewUrl ?? ''
+  const full = attachments.length >= MAX_IMAGES
+  const statusLabel =
+    status === 'running'
+      ? `Developing · ${elapsed.toFixed(0)}s`
+      : status === 'done'
+        ? 'Ready'
+        : status === 'error'
+          ? 'Needs attention'
+          : 'Idle'
+
   return (
-    <main className="page-wrap px-4 pb-16 pt-10">
-      <section className="mb-8 max-w-3xl">
-        <p className="island-kicker mb-2">Qwen-Image-Edit-2511 · 4-step distilled</p>
-        <h1 className="display-title mb-3 text-4xl font-bold tracking-tight text-[var(--sea-ink)] sm:text-5xl">
-          Edit a photo by describing the change
-        </h1>
-        <p className="text-base text-[var(--sea-ink-soft)] sm:text-lg">
-          Runs on a dedicated GPU that shuts down when idle. The first edit of a
-          session takes about half a minute while the model loads; after that, edits
-          take a few seconds.
-        </p>
-      </section>
+    <main className="studio-page">
+      <div className="studio">
+        <div className="studio-copy rise">
+          <p className="kicker">Studio</p>
+          <h1 className="display">Edit a photo by describing the change</h1>
+          <p className="lede">
+            The first edit of a session takes about half a minute while the
+            model loads. After that, each one takes a few seconds.
+          </p>
+        </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* ---------------- input ---------------- */}
-        <section
-          className="island-shell rounded-3xl p-5 sm:p-6"
-          onDragOver={(e) => {
-            e.preventDefault()
-            setDragging(true)
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault()
-            setDragging(false)
-            void addFiles(e.dataTransfer.files)
-          }}
-        >
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--sea-ink-soft)]">
-            1 · Your image{attachments.length ? `s (${attachments.length}/${MAX_IMAGES})` : ''}
-          </h2>
-
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            disabled={attachments.length >= MAX_IMAGES}
-            className={`mb-3 flex w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed px-4 py-8 text-center transition ${
-              dragging
-                ? 'border-[var(--lagoon)] bg-[rgba(79,184,178,0.12)]'
-                : 'border-[var(--line)] hover:border-[var(--lagoon)] hover:bg-[rgba(79,184,178,0.06)]'
-            } disabled:cursor-not-allowed disabled:opacity-50`}
-          >
-            <span className="text-2xl">🖼️</span>
-            <span className="mt-2 text-sm font-semibold text-[var(--sea-ink)]">
-              {attachments.length >= MAX_IMAGES
-                ? `That is all ${MAX_IMAGES} images`
-                : 'Drop images here or click to choose'}
-            </span>
-            <span className="mt-1 text-xs text-[var(--sea-ink-soft)]">
-              Up to {MAX_IMAGES}. Add more than one to combine or compare subjects.
-            </span>
-          </button>
-
-          <input
-            ref={inputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={(e) => {
-              if (e.target.files) void addFiles(e.target.files)
-              e.target.value = ''
+        <div className="work-grid">
+          {/* ---------------- 1 + 2 · input ---------------- */}
+          <section
+            className="card rise"
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragging(true)
             }}
-          />
-
-          {attachments.length > 0 && (
-            <ul className="mb-4 grid grid-cols-3 gap-2">
-              {attachments.map((a) => (
-                <li
-                  key={a.id}
-                  className="group relative overflow-hidden rounded-xl border border-[var(--line)]"
-                >
-                  <img src={a.previewUrl} alt={a.name} className="h-24 w-full object-cover" />
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(a.id)}
-                    aria-label={`Remove ${a.name}`}
-                    className="absolute right-1 top-1 rounded-full bg-black/60 px-2 py-0.5 text-xs font-bold text-white opacity-0 transition group-hover:opacity-100 focus:opacity-100"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <h2 className="mb-3 mt-6 text-sm font-semibold uppercase tracking-wide text-[var(--sea-ink-soft)]">
-            2 · What should change?
-          </h2>
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={3}
-            placeholder="Make the sky a dramatic sunset and keep the subject unchanged"
-            className="mb-3 w-full resize-y rounded-2xl border border-[var(--line)] bg-[var(--surface-strong)] px-4 py-3 text-sm text-[var(--sea-ink)] outline-none transition focus:border-[var(--lagoon)]"
-          />
-
-          <div className="mb-4 flex flex-wrap gap-2">
-            {EXAMPLES.map((example) => (
-              <button
-                key={example}
-                type="button"
-                onClick={() => setPrompt(example)}
-                className="rounded-full border border-[rgba(50,143,151,0.3)] bg-[rgba(79,184,178,0.1)] px-3 py-1 text-xs font-medium text-[var(--lagoon-deep)] transition hover:bg-[rgba(79,184,178,0.2)]"
-              >
-                {example}
-              </button>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setShowAdvanced((v) => !v)}
-            className="mb-3 text-xs font-semibold text-[var(--lagoon-deep)] underline"
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setDragging(false)
+              void addFiles(e.dataTransfer.files)
+            }}
           >
-            {showAdvanced ? 'Hide' : 'Show'} advanced
-          </button>
+            <h2 className="step-label">
+              1 · Your image
+              {attachments.length
+                ? ` (${attachments.length}/${MAX_IMAGES})`
+                : ''}
+            </h2>
 
-          {showAdvanced && (
-            <div className="mb-4 grid grid-cols-2 gap-4 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4">
-              <label className="text-xs font-semibold text-[var(--sea-ink-soft)]">
-                Steps: {steps}
-                <input
-                  type="range"
-                  min={4}
-                  max={20}
-                  step={1}
-                  value={steps}
-                  onChange={(e) => setSteps(Number(e.target.value))}
-                  className="mt-2 w-full"
-                />
-                <span className="mt-1 block font-normal">
-                  4 is the distilled default. Above 4 uses the slower standard path.
-                </span>
-              </label>
-              <label className="text-xs font-semibold text-[var(--sea-ink-soft)]">
-                Seed
-                <input
-                  type="number"
-                  value={seed}
-                  onChange={(e) => setSeed(Number(e.target.value))}
-                  className="mt-2 w-full rounded-lg border border-[var(--line)] bg-white px-2 py-1 text-sm"
-                />
-                <span className="mt-1 block font-normal">
-                  Same seed and input gives the same result.
-                </span>
-              </label>
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={() => void run()}
-            disabled={status === 'running'}
-            className="w-full rounded-full bg-[var(--lagoon-deep)] px-6 py-3 text-sm font-bold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {status === 'running' ? `Editing… ${elapsed.toFixed(1)}s` : 'Edit image'}
-          </button>
-
-          {error && (
-            <p
-              role="alert"
-              className="mt-4 rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              disabled={full}
+              className={`dropzone${dragging ? ' is-hot' : ''}`}
             >
-              {error}
-            </p>
-          )}
-        </section>
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+                className="h-6 w-6 text-[var(--ink-soft)]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+              >
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <circle
+                  cx="8.5"
+                  cy="10"
+                  r="1.5"
+                  fill="currentColor"
+                  stroke="none"
+                />
+                <path d="M21 16l-5.5-5.5L7 19" />
+              </svg>
+              <span className="text-sm font-medium text-[var(--ink)]">
+                {full
+                  ? `That is all ${MAX_IMAGES} images`
+                  : 'Drop images here or click to choose'}
+              </span>
+              <span className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
+                Up to {MAX_IMAGES}. Add more than one to combine or compare
+                subjects.
+              </span>
+            </button>
 
-        {/* ---------------- output ---------------- */}
-        <section className="island-shell rounded-3xl p-5 sm:p-6">
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--sea-ink-soft)]">
-            3 · Result
-          </h2>
+            {attachments.length > 0 && (
+              <ul className="thumbs">
+                {attachments.map((a) => (
+                  <li key={a.id} className="thumb">
+                    <img src={a.previewUrl} alt={a.name} />
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(a.id)}
+                      aria-label={`Remove ${a.name}`}
+                      className="thumb-remove"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
 
-          {status === 'running' && (
-            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--line)] px-4 py-16 text-center">
-              <div className="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--lagoon-deep)]" />
-              <p className="text-sm font-semibold text-[var(--sea-ink)]">
-                Working on it — {elapsed.toFixed(1)}s
-              </p>
-              <p className="mt-1 max-w-xs text-xs text-[var(--sea-ink-soft)]">
-                {elapsed < 30
-                  ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
-                  : 'The GPU is running now; edits themselves take a few seconds.'}
-              </p>
+            <h2 className="step-label">2 · What should change?</h2>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+              placeholder="Make the sky a dramatic sunset and keep the subject unchanged"
+              className="field"
+            />
+
+            <div className="examples">
+              {EXAMPLES.map((example) => (
+                <button
+                  key={example}
+                  type="button"
+                  onClick={() => setPrompt(example)}
+                  className="chip"
+                >
+                  {example}
+                </button>
+              ))}
             </div>
-          )}
 
-          {status === 'idle' && (
-            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--line)] px-4 py-16 text-center">
-              <span className="text-2xl">✨</span>
-              <p className="mt-2 text-sm text-[var(--sea-ink-soft)]">
-                Your edited image will appear here.
-              </p>
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((v) => !v)}
+                className="inline-flex min-h-11 items-center text-xs font-medium text-[var(--ink-soft)] underline-offset-2 hover:text-[var(--ink)] hover:underline"
+                aria-expanded={showAdvanced}
+              >
+                {showAdvanced ? 'Hide advanced' : 'Show advanced'}
+              </button>
+
+              {showAdvanced && (
+                <div className="advanced mt-2">
+                  <label className="text-xs font-medium text-[var(--ink-soft)]">
+                    Steps: {steps}
+                    <input
+                      type="range"
+                      min={4}
+                      max={20}
+                      step={1}
+                      value={steps}
+                      onChange={(e) => setSteps(Number(e.target.value))}
+                      className="mt-2 w-full"
+                    />
+                    <span className="mt-1 block font-normal leading-5">
+                      4 is the distilled default. Above 4 uses the slower
+                      standard path.
+                    </span>
+                  </label>
+                  <label className="text-xs font-medium text-[var(--ink-soft)]">
+                    Seed
+                    <input
+                      type="number"
+                      value={seed}
+                      onChange={(e) => setSeed(Number(e.target.value))}
+                      className="field mt-2 h-10"
+                    />
+                    <span className="mt-1 block font-normal leading-5">
+                      Same seed and input gives the same result.
+                    </span>
+                  </label>
+                </div>
+              )}
             </div>
-          )}
 
-          {status === 'done' && resultUrl && (
-            <>
-              <img
-                src={resultUrl}
-                alt="Edited result"
-                className="mb-3 w-full rounded-2xl border border-[var(--line)]"
-              />
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-[var(--sea-ink-soft)]">{resultMeta}</p>
+            <div className="card-foot">
+              <button
+                type="button"
+                onClick={() => void run()}
+                disabled={status === 'running'}
+                className="btn-primary"
+              >
+                <span>
+                  {status === 'running'
+                    ? `Editing… ${elapsed.toFixed(1)}s`
+                    : 'Edit image'}
+                </span>
+                {status !== 'running' && (
+                  <span className="arrow" aria-hidden="true">
+                    →
+                  </span>
+                )}
+              </button>
+            </div>
+          </section>
+
+          {/* ---------------- 3 · result ---------------- */}
+          <section className="card rise rise-late">
+            <div className="step-row">
+              <h2 className="step-label">3 · Result</h2>
+              <span
+                className={`status-pill${status === 'running' ? ' is-busy' : ''}`}
+              >
+                <span className="dot" aria-hidden="true" />
+                {statusLabel}
+              </span>
+            </div>
+
+            <div
+              className={`result-stage${status === 'done' && resultUrl ? ' has-image' : ''}`}
+            >
+              {status === 'running' ? (
+                <div className="developing">
+                  {preview && (
+                    <img
+                      src={preview}
+                      alt=""
+                      aria-hidden="true"
+                      className="develop-ghost"
+                    />
+                  )}
+                  <div className="develop-inner">
+                    <div className="develop-lights" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <p className="m-0 text-sm font-medium text-[var(--ink)]">
+                      Developing — {elapsed.toFixed(1)}s
+                    </p>
+                    <div className="develop-meter" aria-hidden="true">
+                      <i />
+                    </div>
+                    <p className="m-0 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
+                      {elapsed < 30
+                        ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
+                        : 'The GPU is hot now. Your edit is developing.'}
+                    </p>
+                  </div>
+                </div>
+              ) : status === 'done' && resultUrl ? (
+                <img
+                  src={resultUrl}
+                  alt="Edited result"
+                  className="result-img"
+                />
+              ) : status === 'error' ? (
+                <>
+                  <span className="text-xl" aria-hidden="true">
+                    ⚠️
+                  </span>
+                  <p className="m-0 max-w-xs text-sm leading-6 text-[var(--ink-soft)]">
+                    The edit did not finish. Adjust the prompt and try again.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <span className="text-xl" aria-hidden="true">
+                    ✨
+                  </span>
+                  <p className="m-0 max-w-xs text-sm leading-6 text-[var(--ink-soft)]">
+                    Your edited image will appear here.
+                  </p>
+                </>
+              )}
+            </div>
+
+            {status === 'done' && resultUrl && (
+              <div className="result-bar">
+                <p className="m-0 text-xs text-[var(--ink-soft)]">
+                  {resultMeta}
+                </p>
                 <button
                   type="button"
                   onClick={download}
-                  className="rounded-full border border-[rgba(50,143,151,0.3)] bg-[rgba(79,184,178,0.14)] px-4 py-2 text-xs font-semibold text-[var(--lagoon-deep)] transition hover:bg-[rgba(79,184,178,0.24)]"
+                  className="btn-quiet h-10 px-4 text-xs font-medium"
                 >
                   Download PNG
                 </button>
               </div>
-            </>
-          )}
-        </section>
+            )}
+          </section>
+        </div>
       </div>
 
-      <p className="mt-8 max-w-2xl text-xs text-[var(--sea-ink-soft)]">
-        Images are sent to a GPU for processing and are not stored. The model is
-        Qwen-Image-Edit-2511 running on Modal, distilled to 4 steps.
-      </p>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(e) => {
+          if (e.target.files) void addFiles(e.target.files)
+          e.target.value = ''
+        }}
+      />
     </main>
   )
 }
