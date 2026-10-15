@@ -699,17 +699,6 @@ input[type="range"] {
   background: color-mix(in oklab, currentColor 10%, transparent);
 }
 
-.alert {
-  margin: 0.75rem 0 0;
-  border: 1px solid var(--danger-line);
-  border-radius: 0.9rem;
-  background: var(--danger-bg);
-  padding: 0.7rem 0.9rem;
-  font-size: 0.83rem;
-  line-height: 1.5;
-  color: var(--danger-ink);
-}
-
 .btn-primary,
 .btn-quiet {
   position: relative;

@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { editImage } from '#/lib/edit'
+import { pushToast } from '#/lib/toast'
 
 export const Route = createFileRoute('/')({ component: App })
 
@@ -36,7 +37,13 @@ async function prepareImage(file: File): Promise<Attachment> {
     )
   }
 
-  const bitmap = await createImageBitmap(file)
+  let bitmap: ImageBitmap
+  try {
+    bitmap = await createImageBitmap(file)
+  } catch {
+    throw new Error(`${file.name} could not be read. Try a different image.`)
+  }
+
   const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height))
   const width = Math.max(1, Math.round(bitmap.width * scale))
   const height = Math.max(1, Math.round(bitmap.height * scale))
@@ -52,11 +59,14 @@ async function prepareImage(file: File): Promise<Attachment> {
   bitmap.close()
 
   const dataUrl = canvas.toDataURL('image/png')
+  const base64 = dataUrl.split(',')[1] ?? ''
+  if (!base64) throw new Error(`${file.name} could not be prepared.`)
+
   return {
     id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: file.name,
     previewUrl: dataUrl,
-    base64: dataUrl.split(',')[1] ?? '',
+    base64,
   }
 }
 
@@ -67,10 +77,11 @@ function App() {
   const [seed, setSeed] = useState(0)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
-  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>(
+    'idle',
+  )
   const [resultUrl, setResultUrl] = useState('')
   const [resultMeta, setResultMeta] = useState('')
-  const [error, setError] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
 
@@ -89,21 +100,48 @@ function App() {
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
-      setError('')
-      const incoming = Array.from(files).filter((f) => f.type.startsWith('image/'))
-      if (incoming.length === 0) return
+      const list = Array.from(files)
+      if (list.length === 0) return
+
+      const incoming = list.filter((file) => file.type.startsWith('image/'))
+      if (incoming.length === 0) {
+        pushToast('error', 'Choose an image file.')
+        return
+      }
+      if (incoming.length < list.length) {
+        pushToast('info', 'Skipped files that are not images.')
+      }
 
       const room = MAX_IMAGES - attachments.length
       if (room <= 0) {
-        setError(`Up to ${MAX_IMAGES} images. Remove one first.`)
+        pushToast(
+          'error',
+          `You can add up to ${MAX_IMAGES} images. Remove one first.`,
+        )
         return
       }
 
-      try {
-        const prepared = await Promise.all(incoming.slice(0, room).map(prepareImage))
+      const accepted = incoming.slice(0, room)
+      const prepared: Attachment[] = []
+      for (const file of accepted) {
+        try {
+          prepared.push(await prepareImage(file))
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : 'Could not read that image.'
+          pushToast('error', message)
+        }
+      }
+
+      if (prepared.length > 0) {
         setAttachments((prev) => [...prev, ...prepared].slice(0, MAX_IMAGES))
-      } catch (err) {
-        setError((err as Error).message)
+      }
+      if (incoming.length > room) {
+        const noun = room === 1 ? 'image fits' : 'images fit'
+        pushToast(
+          'info',
+          `Only ${room} more ${noun}. The limit is ${MAX_IMAGES}.`,
+        )
       }
     },
     [attachments.length],
@@ -114,16 +152,15 @@ function App() {
 
   const run = async () => {
     if (attachments.length === 0) {
-      setError('Add at least one image.')
+      pushToast('error', 'Add at least one image.')
       return
     }
     if (!prompt.trim()) {
-      setError('Describe the edit you want.')
+      pushToast('error', 'Describe the edit you want.')
       return
     }
 
     setStatus('running')
-    setError('')
     setResultUrl('')
     setResultMeta('')
 
@@ -138,7 +175,7 @@ function App() {
       })
 
       if (!out.ok || !out.imageBase64) {
-        setError(out.error ?? 'Something went wrong.')
+        pushToast('error', out.error ?? 'The edit did not finish. Try again.')
         setStatus('error')
         return
       }
@@ -146,8 +183,17 @@ function App() {
       setResultUrl(`data:image/png;base64,${out.imageBase64}`)
       setResultMeta(`${out.seconds}s on the GPU · ${out.steps} steps`)
       setStatus('done')
+      pushToast(
+        'success',
+        out.seconds ? `Edit ready in ${out.seconds}s.` : 'Edit ready.',
+      )
     } catch (err) {
-      setError((err as Error).message)
+      const message =
+        err instanceof Error ? err.message : 'The edit did not finish.'
+      const friendly = /fetch|network|load failed/i.test(message)
+        ? 'Could not reach the editor. Try again in a moment.'
+        : message
+      pushToast('error', friendly)
       setStatus('error')
     }
   }
@@ -158,6 +204,7 @@ function App() {
     a.href = resultUrl
     a.download = `edited-${Date.now()}.png`
     a.click()
+    pushToast('success', 'Download started.')
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
@@ -178,8 +225,8 @@ function App() {
           <p className="kicker">Studio</p>
           <h1 className="display">Edit a photo by describing the change</h1>
           <p className="lede">
-            The first edit of a session takes about half a minute while the model loads.
-            After that, each one takes a few seconds.
+            The first edit of a session takes about half a minute while the
+            model loads. After that, each one takes a few seconds.
           </p>
         </div>
 
@@ -199,7 +246,10 @@ function App() {
             }}
           >
             <h2 className="step-label">
-              1 · Your image{attachments.length ? ` (${attachments.length}/${MAX_IMAGES})` : ''}
+              1 · Your image
+              {attachments.length
+                ? ` (${attachments.length}/${MAX_IMAGES})`
+                : ''}
             </h2>
 
             <button
@@ -217,7 +267,13 @@ function App() {
                 strokeWidth="1.6"
               >
                 <rect x="3" y="5" width="18" height="14" rx="2" />
-                <circle cx="8.5" cy="10" r="1.5" fill="currentColor" stroke="none" />
+                <circle
+                  cx="8.5"
+                  cy="10"
+                  r="1.5"
+                  fill="currentColor"
+                  stroke="none"
+                />
                 <path d="M21 16l-5.5-5.5L7 19" />
               </svg>
               <span className="text-sm font-medium text-[var(--ink)]">
@@ -226,7 +282,8 @@ function App() {
                   : 'Drop images here or click to choose'}
               </span>
               <span className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-                Up to {MAX_IMAGES}. Add more than one to combine or compare subjects.
+                Up to {MAX_IMAGES}. Add more than one to combine or compare
+                subjects.
               </span>
             </button>
 
@@ -294,7 +351,8 @@ function App() {
                       className="mt-2 w-full"
                     />
                     <span className="mt-1 block font-normal leading-5">
-                      4 is the distilled default. Above 4 uses the slower standard path.
+                      4 is the distilled default. Above 4 uses the slower
+                      standard path.
                     </span>
                   </label>
                   <label className="text-xs font-medium text-[var(--ink-soft)]">
@@ -320,15 +378,17 @@ function App() {
                 disabled={status === 'running'}
                 className="btn-primary"
               >
-                <span>{status === 'running' ? `Editing… ${elapsed.toFixed(1)}s` : 'Edit image'}</span>
-                {status !== 'running' && <span className="arrow" aria-hidden="true">→</span>}
+                <span>
+                  {status === 'running'
+                    ? `Editing… ${elapsed.toFixed(1)}s`
+                    : 'Edit image'}
+                </span>
+                {status !== 'running' && (
+                  <span className="arrow" aria-hidden="true">
+                    →
+                  </span>
+                )}
               </button>
-
-              {error && (
-                <p role="alert" className="alert">
-                  {error}
-                </p>
-              )}
             </div>
           </section>
 
@@ -336,17 +396,26 @@ function App() {
           <section className="card rise rise-late">
             <div className="step-row">
               <h2 className="step-label">3 · Result</h2>
-              <span className={`status-pill${status === 'running' ? ' is-busy' : ''}`}>
+              <span
+                className={`status-pill${status === 'running' ? ' is-busy' : ''}`}
+              >
                 <span className="dot" aria-hidden="true" />
                 {statusLabel}
               </span>
             </div>
 
-            <div className={`result-stage${status === 'done' && resultUrl ? ' has-image' : ''}`}>
+            <div
+              className={`result-stage${status === 'done' && resultUrl ? ' has-image' : ''}`}
+            >
               {status === 'running' ? (
                 <div className="developing">
                   {preview && (
-                    <img src={preview} alt="" aria-hidden="true" className="develop-ghost" />
+                    <img
+                      src={preview}
+                      alt=""
+                      aria-hidden="true"
+                      className="develop-ghost"
+                    />
                   )}
                   <div className="develop-inner">
                     <div className="develop-lights" aria-hidden="true">
@@ -368,7 +437,11 @@ function App() {
                   </div>
                 </div>
               ) : status === 'done' && resultUrl ? (
-                <img src={resultUrl} alt="Edited result" className="result-img" />
+                <img
+                  src={resultUrl}
+                  alt="Edited result"
+                  className="result-img"
+                />
               ) : status === 'error' ? (
                 <>
                   <span className="text-xl" aria-hidden="true">
@@ -392,7 +465,9 @@ function App() {
 
             {status === 'done' && resultUrl && (
               <div className="result-bar">
-                <p className="m-0 text-xs text-[var(--ink-soft)]">{resultMeta}</p>
+                <p className="m-0 text-xs text-[var(--ink-soft)]">
+                  {resultMeta}
+                </p>
                 <button
                   type="button"
                   onClick={download}
