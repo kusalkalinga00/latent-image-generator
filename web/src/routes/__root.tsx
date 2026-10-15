@@ -75,7 +75,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       </head>
       <body className="flex min-h-screen flex-col font-sans antialiased [overflow-wrap:anywhere]">
         <Header />
-        <div className="flex-1">{children}</div>
+        <div>{children}</div>
         <Footer />
         <Toaster />
         <TanStackDevtools
