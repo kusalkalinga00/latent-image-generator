@@ -1,35 +1,23 @@
-import { Link } from '@tanstack/react-router'
 import ThemeToggle from './ThemeToggle'
-
-const REPO_URL = 'https://github.com/kusalkalinga00/image-editor'
 
 export default function Header() {
   return (
-    <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--header-bg)] px-4 backdrop-blur-lg">
-      <nav className="page-wrap flex flex-wrap items-center gap-x-3 gap-y-2 py-3 sm:py-4">
-        <h2 className="m-0 flex-shrink-0 text-base font-semibold tracking-tight">
-          <Link
-            to="/"
-            className="inline-flex items-center gap-2 rounded-full border border-[var(--chip-line)] bg-[var(--chip-bg)] px-3 py-1.5 text-sm text-[var(--sea-ink)] no-underline shadow-[0_8px_24px_rgba(30,90,72,0.08)] sm:px-4 sm:py-2"
-          >
-            <span className="h-2 w-2 rounded-full bg-[linear-gradient(90deg,#56c6be,#7ed3bf)]" />
-            image-editor
-          </Link>
-        </h2>
-
-        <div className="order-3 flex w-full flex-wrap items-center gap-x-4 gap-y-1 pb-1 text-sm font-semibold sm:order-none sm:w-auto sm:flex-nowrap sm:pb-0">
-          <Link to="/" className="nav-link" activeProps={{ className: 'nav-link is-active' }}>
-            Editor
-          </Link>
-          <a href={REPO_URL} className="nav-link" target="_blank" rel="noreferrer">
-            Source
-          </a>
+    <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--header-bg)] backdrop-blur-md">
+      <div className="page-wrap flex items-center justify-between gap-3 py-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-[var(--accent)] text-[var(--accent-ink)]">
+            <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <circle cx="8.5" cy="10" r="1.5" fill="currentColor" stroke="none" />
+              <path d="M21 16l-5.5-5.5L7 19" />
+            </svg>
+          </span>
+          <span className="truncate text-[15px] font-medium tracking-tight text-[var(--ink)]">
+            Image Editor
+          </span>
         </div>
-
-        <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
-          <ThemeToggle />
-        </div>
-      </nav>
+        <ThemeToggle />
+      </div>
     </header>
   )
 }

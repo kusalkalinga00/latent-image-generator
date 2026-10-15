@@ -161,23 +161,23 @@ function App() {
   }
 
   return (
-    <main className="page-wrap px-4 pb-16 pt-10">
-      <section className="mb-8 max-w-3xl">
-        <p className="island-kicker mb-2">Qwen-Image-Edit-2511 · 4-step distilled</p>
-        <h1 className="display-title mb-3 text-4xl font-bold tracking-tight text-[var(--sea-ink)] sm:text-5xl">
+    <main className="page-wrap py-6 sm:py-10">
+      <section className="mb-6 max-w-2xl sm:mb-8">
+        <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--ink-soft)]">
+          Qwen-Image-Edit
+        </p>
+        <h1 className="text-2xl font-medium tracking-tight text-[var(--ink)] sm:text-3xl">
           Edit a photo by describing the change
         </h1>
-        <p className="text-base text-[var(--sea-ink-soft)] sm:text-lg">
-          Runs on a dedicated GPU that shuts down when idle. The first edit of a
-          session takes about half a minute while the model loads; after that, edits
-          take a few seconds.
+        <p className="mt-2 text-sm leading-6 text-[var(--ink-soft)] sm:text-[15px]">
+          The first edit of a session takes about half a minute while the model loads.
+          After that, edits take a few seconds.
         </p>
       </section>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* ---------------- input ---------------- */}
+      <div className="grid items-start gap-4 lg:grid-cols-2 lg:gap-6">
         <section
-          className="island-shell rounded-3xl p-5 sm:p-6"
+          className="panel rounded-xl p-4 sm:p-5"
           onDragOver={(e) => {
             e.preventDefault()
             setDragging(true)
@@ -189,27 +189,26 @@ function App() {
             void addFiles(e.dataTransfer.files)
           }}
         >
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--sea-ink-soft)]">
-            1 · Your image{attachments.length ? `s (${attachments.length}/${MAX_IMAGES})` : ''}
+          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+            Image{attachments.length ? ` · ${attachments.length}/${MAX_IMAGES}` : ''}
           </h2>
 
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
             disabled={attachments.length >= MAX_IMAGES}
-            className={`mb-3 flex w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed px-4 py-8 text-center transition ${
+            className={`mb-3 flex min-h-32 w-full flex-col items-center justify-center rounded-lg border border-dashed px-4 py-6 text-center transition ${
               dragging
-                ? 'border-[var(--lagoon)] bg-[rgba(79,184,178,0.12)]'
-                : 'border-[var(--line)] hover:border-[var(--lagoon)] hover:bg-[rgba(79,184,178,0.06)]'
+                ? 'border-[var(--ink)] bg-[var(--surface-muted)]'
+                : 'border-[var(--line)] bg-[var(--surface-muted)] hover:border-[var(--ink-soft)]'
             } disabled:cursor-not-allowed disabled:opacity-50`}
           >
-            <span className="text-2xl">🖼️</span>
-            <span className="mt-2 text-sm font-semibold text-[var(--sea-ink)]">
+            <span className="text-sm font-medium text-[var(--ink)]">
               {attachments.length >= MAX_IMAGES
                 ? `That is all ${MAX_IMAGES} images`
-                : 'Drop images here or click to choose'}
+                : 'Drop images here or tap to choose'}
             </span>
-            <span className="mt-1 text-xs text-[var(--sea-ink-soft)]">
+            <span className="mt-1 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
               Up to {MAX_IMAGES}. Add more than one to combine or compare subjects.
             </span>
           </button>
@@ -227,44 +226,44 @@ function App() {
           />
 
           {attachments.length > 0 && (
-            <ul className="mb-4 grid grid-cols-3 gap-2">
+            <ul className="mb-5 grid grid-cols-3 gap-2">
               {attachments.map((a) => (
                 <li
                   key={a.id}
-                  className="group relative overflow-hidden rounded-xl border border-[var(--line)]"
+                  className="relative overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface-muted)]"
                 >
-                  <img src={a.previewUrl} alt={a.name} className="h-24 w-full object-cover" />
+                  <img src={a.previewUrl} alt={a.name} className="aspect-square w-full object-cover sm:h-28 sm:aspect-auto" />
                   <button
                     type="button"
                     onClick={() => removeAttachment(a.id)}
                     aria-label={`Remove ${a.name}`}
-                    className="absolute right-1 top-1 rounded-full bg-black/60 px-2 py-0.5 text-xs font-bold text-white opacity-0 transition group-hover:opacity-100 focus:opacity-100"
+                    className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-md bg-slate-950/75 text-sm text-white"
                   >
-                    ✕
+                    ×
                   </button>
                 </li>
               ))}
             </ul>
           )}
 
-          <h2 className="mb-3 mt-6 text-sm font-semibold uppercase tracking-wide text-[var(--sea-ink-soft)]">
-            2 · What should change?
+          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+            Prompt
           </h2>
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            rows={3}
+            rows={4}
             placeholder="Make the sky a dramatic sunset and keep the subject unchanged"
-            className="mb-3 w-full resize-y rounded-2xl border border-[var(--line)] bg-[var(--surface-strong)] px-4 py-3 text-sm text-[var(--sea-ink)] outline-none transition focus:border-[var(--lagoon)]"
+            className="mb-3 w-full resize-y rounded-lg border border-[var(--line)] bg-[var(--surface-muted)] px-3 py-3 text-sm leading-6 text-[var(--ink)] outline-none transition placeholder:text-[var(--ink-soft)] focus:border-[var(--ink-soft)]"
           />
 
-          <div className="mb-4 flex flex-wrap gap-2">
+          <div className="mb-4 flex flex-col gap-2">
             {EXAMPLES.map((example) => (
               <button
                 key={example}
                 type="button"
                 onClick={() => setPrompt(example)}
-                className="rounded-full border border-[rgba(50,143,151,0.3)] bg-[rgba(79,184,178,0.1)] px-3 py-1 text-xs font-medium text-[var(--lagoon-deep)] transition hover:bg-[rgba(79,184,178,0.2)]"
+                className="rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-2.5 text-left text-xs leading-5 text-[var(--ink)] transition hover:bg-[var(--surface-muted)]"
               >
                 {example}
               </button>
@@ -274,14 +273,15 @@ function App() {
           <button
             type="button"
             onClick={() => setShowAdvanced((v) => !v)}
-            className="mb-3 text-xs font-semibold text-[var(--lagoon-deep)] underline"
+            className="mb-3 inline-flex min-h-11 items-center text-xs font-medium text-[var(--ink-soft)] underline-offset-2 hover:text-[var(--ink)] hover:underline"
+            aria-expanded={showAdvanced}
           >
-            {showAdvanced ? 'Hide' : 'Show'} advanced
+            {showAdvanced ? 'Hide advanced' : 'Show advanced'}
           </button>
 
           {showAdvanced && (
-            <div className="mb-4 grid grid-cols-2 gap-4 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4">
-              <label className="text-xs font-semibold text-[var(--sea-ink-soft)]">
+            <div className="mb-4 grid gap-4 rounded-lg border border-[var(--line)] bg-[var(--surface-muted)] p-4 sm:grid-cols-2">
+              <label className="text-xs font-medium text-[var(--ink-soft)]">
                 Steps: {steps}
                 <input
                   type="range"
@@ -292,19 +292,19 @@ function App() {
                   onChange={(e) => setSteps(Number(e.target.value))}
                   className="mt-2 w-full"
                 />
-                <span className="mt-1 block font-normal">
+                <span className="mt-1 block font-normal leading-5">
                   4 is the distilled default. Above 4 uses the slower standard path.
                 </span>
               </label>
-              <label className="text-xs font-semibold text-[var(--sea-ink-soft)]">
+              <label className="text-xs font-medium text-[var(--ink-soft)]">
                 Seed
                 <input
                   type="number"
                   value={seed}
                   onChange={(e) => setSeed(Number(e.target.value))}
-                  className="mt-2 w-full rounded-lg border border-[var(--line)] bg-white px-2 py-1 text-sm"
+                  className="mt-2 h-10 w-full rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 text-sm text-[var(--ink)] outline-none focus:border-[var(--ink-soft)]"
                 />
-                <span className="mt-1 block font-normal">
+                <span className="mt-1 block font-normal leading-5">
                   Same seed and input gives the same result.
                 </span>
               </label>
@@ -315,7 +315,7 @@ function App() {
             type="button"
             onClick={() => void run()}
             disabled={status === 'running'}
-            className="w-full rounded-full bg-[var(--lagoon-deep)] px-6 py-3 text-sm font-bold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+            className="h-11 w-full rounded-lg bg-[var(--accent)] px-4 text-sm font-medium text-[var(--accent-ink)] transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {status === 'running' ? `Editing… ${elapsed.toFixed(1)}s` : 'Edit image'}
           </button>
@@ -323,39 +323,41 @@ function App() {
           {error && (
             <p
               role="alert"
-              className="mt-4 rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800"
+              className="mt-4 rounded-lg border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-3 text-sm leading-6 text-[var(--danger-ink)]"
             >
               {error}
             </p>
           )}
         </section>
 
-        {/* ---------------- output ---------------- */}
-        <section className="island-shell rounded-3xl p-5 sm:p-6">
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--sea-ink-soft)]">
-            3 · Result
+        <section className="panel rounded-xl p-4 sm:p-5">
+          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+            Result
           </h2>
 
           {status === 'running' && (
-            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--line)] px-4 py-16 text-center">
-              <div className="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--lagoon-deep)]" />
-              <p className="text-sm font-semibold text-[var(--sea-ink)]">
-                Working on it — {elapsed.toFixed(1)}s
+            <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-10 text-center sm:min-h-80">
+              <div className="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--ink)]" />
+              <p className="text-sm font-medium text-[var(--ink)]">
+                Working — {elapsed.toFixed(1)}s
               </p>
-              <p className="mt-1 max-w-xs text-xs text-[var(--sea-ink-soft)]">
+              <p className="mt-1 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
                 {elapsed < 30
                   ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
-                  : 'The GPU is running now; edits themselves take a few seconds.'}
+                  : 'The GPU is running now. Edits themselves take a few seconds.'}
               </p>
             </div>
           )}
 
           {status === 'idle' && (
-            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--line)] px-4 py-16 text-center">
-              <span className="text-2xl">✨</span>
-              <p className="mt-2 text-sm text-[var(--sea-ink-soft)]">
-                Your edited image will appear here.
-              </p>
+            <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-10 text-center sm:min-h-80">
+              <p className="text-sm text-[var(--ink-soft)]">The edited image will appear here.</p>
+            </div>
+          )}
+
+          {status === 'error' && !resultUrl && (
+            <div className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-10 text-center sm:min-h-80">
+              <p className="text-sm text-[var(--ink-soft)]">The edit did not finish. Adjust the prompt and try again.</p>
             </div>
           )}
 
@@ -364,14 +366,14 @@ function App() {
               <img
                 src={resultUrl}
                 alt="Edited result"
-                className="mb-3 w-full rounded-2xl border border-[var(--line)]"
+                className="mb-3 max-h-[70vh] w-full rounded-lg border border-[var(--line)] bg-[var(--surface-muted)] object-contain"
               />
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-[var(--sea-ink-soft)]">{resultMeta}</p>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-[var(--ink-soft)]">{resultMeta}</p>
                 <button
                   type="button"
                   onClick={download}
-                  className="rounded-full border border-[rgba(50,143,151,0.3)] bg-[rgba(79,184,178,0.14)] px-4 py-2 text-xs font-semibold text-[var(--lagoon-deep)] transition hover:bg-[rgba(79,184,178,0.24)]"
+                  className="h-10 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-4 text-xs font-medium text-[var(--ink)] transition hover:bg-[var(--surface-muted)] sm:w-auto"
                 >
                   Download PNG
                 </button>
@@ -380,11 +382,6 @@ function App() {
           )}
         </section>
       </div>
-
-      <p className="mt-8 max-w-2xl text-xs text-[var(--sea-ink-soft)]">
-        Images are sent to a GPU for processing and are not stored. The model is
-        Qwen-Image-Edit-2511 running on Modal, distilled to 4 steps.
-      </p>
     </main>
   )
 }
