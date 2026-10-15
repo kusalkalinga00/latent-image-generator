@@ -176,29 +176,55 @@ input[type="range"] {
   gap: 1.25rem;
 }
 
+.studio-copy {
+  text-align: center;
+}
+
+.panels {
+  display: grid;
+  align-items: stretch;
+  gap: 1.25rem;
+}
+
+.stage-column {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
 @media (min-width: 1024px) {
   .studio {
     min-height: calc(100dvh - 8.75rem);
     align-content: center;
-    grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.78fr);
-    grid-template-areas:
-      "copy command"
-      "stage command";
-    column-gap: 2.5rem;
-    row-gap: 1.35rem;
+    gap: 1.5rem;
   }
 
-  .studio-copy {
-    grid-area: copy;
+  .panels {
+    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.72fr);
+    grid-template-rows: auto auto;
+    column-gap: 1.5rem;
+    row-gap: 0.8rem;
+  }
+
+  .stage-column {
+    display: contents;
   }
 
   .stage-wrap {
-    grid-area: stage;
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .filmstrip {
+    grid-column: 1;
+    grid-row: 2;
+    margin-top: 0;
   }
 
   .command {
-    grid-area: command;
-    align-self: center;
+    grid-column: 2;
+    grid-row: 1;
   }
 }
 
@@ -212,8 +238,9 @@ input[type="range"] {
 }
 
 .display {
-  margin: 0;
-  max-width: 18ch;
+  margin: 0 auto;
+  max-width: 16ch;
+  text-align: center;
   font-size: clamp(2rem, 4.4vw, 3.35rem);
   font-weight: 500;
   line-height: 1.02;
@@ -225,8 +252,9 @@ input[type="range"] {
 }
 
 .lede {
-  margin: 0.9rem 0 0;
-  max-width: 34rem;
+  margin: 0.9rem auto 0;
+  max-width: 36rem;
+  text-align: center;
   font-size: 0.95rem;
   line-height: 1.6;
   color: var(--ink-soft);
@@ -274,10 +302,14 @@ input[type="range"] {
   background: color-mix(in oklab, var(--bg-1) 40%, transparent);
 }
 
-@media (min-width: 1024px) {
-  .display {
-    max-width: 11ch;
-  }
+.stage-wrap {
+  display: flex;
+  min-width: 0;
+}
+
+.stage-frame {
+  flex: 1;
+  width: 100%;
 }
 
 .stage-empty {
@@ -341,7 +373,7 @@ input[type="range"] {
 .filmstrip {
   display: flex;
   gap: 0.6rem;
-  margin-top: 0.8rem;
+  margin-top: 0;
   overflow-x: auto;
   padding-bottom: 0.15rem;
 }
@@ -389,6 +421,8 @@ input[type="range"] {
 }
 
 .command {
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--line);
   border-radius: 1.5rem;
   background:
@@ -470,6 +504,7 @@ input[type="range"] {
   display: flex;
   height: 3rem;
   width: 100%;
+  margin-top: auto;
   align-items: center;
   justify-content: center;
   gap: 0.55rem;

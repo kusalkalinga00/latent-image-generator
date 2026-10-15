@@ -176,6 +176,8 @@ function App() {
           </p>
         </div>
 
+        <div className="panels">
+        <div className="stage-column">
         <section
           className="stage-wrap rise"
           onDragOver={(e) => {
@@ -230,33 +232,33 @@ function App() {
               </div>
             )}
           </div>
-
-          <div className="filmstrip">
-            {attachments.map((a) => (
-              <div key={a.id} className="film-card">
-                <img src={a.previewUrl} alt={a.name} />
-                <button
-                  type="button"
-                  onClick={() => removeAttachment(a.id)}
-                  aria-label={`Remove ${a.name}`}
-                  className="film-remove"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-            {attachments.length < MAX_IMAGES && (
+        </section>
+        <div className="filmstrip">
+          {attachments.map((a) => (
+            <div key={a.id} className="film-card">
+              <img src={a.previewUrl} alt={a.name} />
               <button
                 type="button"
-                className="film-add btn-quiet"
-                onClick={() => inputRef.current?.click()}
-                aria-label="Add an image"
+                onClick={() => removeAttachment(a.id)}
+                aria-label={`Remove ${a.name}`}
+                className="film-remove"
               >
-                +
+                ×
               </button>
-            )}
-          </div>
-        </section>
+            </div>
+          ))}
+          {attachments.length < MAX_IMAGES && (
+            <button
+              type="button"
+              className="film-add btn-quiet"
+              onClick={() => inputRef.current?.click()}
+              aria-label="Add an image"
+            >
+              +
+            </button>
+          )}
+        </div>
+        </div>
 
         <aside className="command rise rise-late">
           <h2 className="m-0 mb-3 text-sm font-medium tracking-tight text-[var(--ink)]">
@@ -338,6 +340,7 @@ function App() {
             </p>
           )}
         </aside>
+        </div>
       </div>
 
       <input
