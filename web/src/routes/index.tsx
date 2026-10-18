@@ -235,6 +235,21 @@ function App() {
     [attachments.length],
   )
 
+  const useSample = async () => {
+    try {
+      const response = await fetch('/sample.png')
+      if (!response.ok) throw new Error('The sample image could not be loaded.')
+      const blob = await response.blob()
+      await addFiles([new File([blob], 'sample.png', { type: 'image/png' })])
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'The sample image could not be loaded.'
+      pushToast('error', message)
+    }
+  }
+
   const removeAttachment = (id: string) =>
     setAttachments((prev) => prev.filter((a) => a.id !== id))
 
@@ -304,7 +319,9 @@ function App() {
         ? 'Ready'
         : status === 'error'
           ? 'Needs attention'
-          : 'Idle'
+          : preview
+            ? 'Ready to edit'
+            : 'Idle'
 
   return (
     <main className="studio-page">
@@ -490,7 +507,7 @@ function App() {
             </div>
 
             <div
-              className={`result-stage${status === 'done' && resultUrl ? ' has-image' : ''}`}
+              className={`result-stage${(status === 'done' && resultUrl) || (status === 'idle' && preview) ? ' has-image' : ''}`}
             >
               {status === 'running' ? (
                 <div className="developing">
@@ -536,6 +553,15 @@ function App() {
                     The edit did not finish. Adjust the prompt and try again.
                   </p>
                 </>
+              ) : preview ? (
+                <div className="preview-frame">
+                  <img
+                    src={preview}
+                    alt={attachments[0]?.name ?? 'Selected image'}
+                    className="result-img"
+                  />
+                  <span className="stage-tag">Original</span>
+                </div>
               ) : (
                 <>
                   <span className="text-xl" aria-hidden="true">
@@ -544,6 +570,13 @@ function App() {
                   <p className="m-0 max-w-xs text-sm leading-6 text-[var(--ink-soft)]">
                     Your edited image will appear here.
                   </p>
+                  <button
+                    type="button"
+                    onClick={() => void useSample()}
+                    className="btn-quiet h-10 px-4 text-xs font-medium"
+                  >
+                    Try a sample
+                  </button>
                 </>
               )}
             </div>
