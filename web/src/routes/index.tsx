@@ -123,6 +123,39 @@ function CreditCard({ credit }: { credit: CreditView }) {
   )
 }
 
+function Compare({ before, after }: { before: string; after: string }) {
+  const [pos, setPos] = useState(56)
+
+  return (
+    <div className="compare">
+      <img src={after} alt="Edited result" className="result-img" />
+      <img
+        src={before}
+        alt=""
+        aria-hidden="true"
+        className="compare-before result-img"
+        style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
+      />
+      <span className="stage-tag">Before</span>
+      <span className="stage-tag stage-tag-end">After</span>
+      <span
+        className="compare-handle"
+        style={{ left: `${pos}%` }}
+        aria-hidden="true"
+      />
+      <input
+        className="compare-range"
+        type="range"
+        min={0}
+        max={100}
+        value={pos}
+        aria-label="Compare the original and the edit"
+        onChange={(event) => setPos(Number(event.target.value))}
+      />
+    </div>
+  )
+}
+
 function CreditSkeleton() {
   return (
     <section
@@ -164,6 +197,7 @@ function App() {
   const [credit, setCredit] = useState<CreditView | null>(null)
 
   const inputRef = useRef<HTMLInputElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
   const runRef = useRef<() => void>(() => {})
   const statusRef = useRef(status)
   statusRef.current = status
@@ -334,6 +368,26 @@ function App() {
     }
   }
 
+  const continueFromResult = async () => {
+    if (!resultUrl) return
+    try {
+      const blob = await fetch(resultUrl).then((response) => response.blob())
+      const next = await prepareImage(
+        new File([blob], 'edited.png', { type: 'image/png' }),
+      )
+      setAttachments([next])
+      setResultUrl('')
+      setResultMeta('')
+      setStatus('idle')
+      pushToast('info', 'This result is now the image to edit.')
+      promptRef.current?.focus()
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Could not use that result.'
+      pushToast('error', message)
+    }
+  }
+
   const download = () => {
     if (!resultUrl) return
     const a = document.createElement('a')
@@ -452,6 +506,7 @@ function App() {
 
             <h2 className="step-label">2 · What should change?</h2>
             <textarea
+              ref={promptRef}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={4}
@@ -585,11 +640,15 @@ function App() {
                   </div>
                 </div>
               ) : status === 'done' && resultUrl ? (
-                <img
-                  src={resultUrl}
-                  alt="Edited result"
-                  className="result-img"
-                />
+                preview ? (
+                  <Compare before={preview} after={resultUrl} />
+                ) : (
+                  <img
+                    src={resultUrl}
+                    alt="Edited result"
+                    className="result-img"
+                  />
+                )
               ) : status === 'error' ? (
                 <>
                   <span className="text-xl" aria-hidden="true">
@@ -632,13 +691,22 @@ function App() {
                 <p className="m-0 text-xs text-[var(--ink-soft)]">
                   {resultMeta}
                 </p>
-                <button
-                  type="button"
-                  onClick={download}
-                  className="btn-quiet h-10 px-4 text-xs font-medium"
-                >
-                  Download PNG
-                </button>
+                <div className="result-actions">
+                  <button
+                    type="button"
+                    onClick={() => void continueFromResult()}
+                    className="btn-quiet h-10 px-4 text-xs font-medium"
+                  >
+                    Edit this result
+                  </button>
+                  <button
+                    type="button"
+                    onClick={download}
+                    className="btn-quiet h-10 px-4 text-xs font-medium"
+                  >
+                    Download PNG
+                  </button>
+                </div>
               </div>
             )}
           </section>
