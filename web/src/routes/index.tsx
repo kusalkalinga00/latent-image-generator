@@ -255,30 +255,6 @@ function App() {
     if (apple) setShortcut('⌘ Enter')
   }, [])
 
-  useEffect(() => {
-    const onPaste = (event: ClipboardEvent) => {
-      const images = Array.from(event.clipboardData?.files ?? []).filter(
-        (file) => file.type.startsWith('image/'),
-      )
-      if (images.length === 0) return
-      event.preventDefault()
-      void addFiles(images)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Enter' || event.isComposing) return
-      if (!(event.metaKey || event.ctrlKey)) return
-      if (statusRef.current === 'running') return
-      event.preventDefault()
-      runRef.current()
-    }
-    window.addEventListener('paste', onPaste)
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('paste', onPaste)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [addFiles])
-
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
       const list = Array.from(files)
@@ -328,6 +304,30 @@ function App() {
     [attachments.length],
   )
 
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      const images = Array.from(event.clipboardData?.files ?? []).filter(
+        (file) => file.type.startsWith('image/'),
+      )
+      if (images.length === 0) return
+      event.preventDefault()
+      void addFiles(images)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || event.isComposing) return
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (statusRef.current === 'running') return
+      event.preventDefault()
+      runRef.current()
+    }
+    window.addEventListener('paste', onPaste)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('paste', onPaste)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [addFiles])
+
   const useSample = async () => {
     try {
       const response = await fetch('/sample.png')
@@ -358,6 +358,7 @@ function App() {
     if (statusRef.current === 'running') return
 
     const id = ++runId.current
+    setElapsed(0)
     setStatus('running')
     resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 
