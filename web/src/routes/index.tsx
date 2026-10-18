@@ -164,6 +164,10 @@ function App() {
   const [credit, setCredit] = useState<CreditView | null>(null)
 
   const inputRef = useRef<HTMLInputElement>(null)
+  const runRef = useRef<() => void>(() => {})
+  const statusRef = useRef(status)
+  statusRef.current = status
+  const [shortcut, setShortcut] = useState('Ctrl+Enter')
 
   // The first run of a session loads 53.76 GiB into VRAM, which takes about 30s
   // before a single denoising step happens. A bare spinner for that reads as
@@ -185,6 +189,35 @@ function App() {
     const id = setInterval(() => setElapsed((Date.now() - started) / 1000), 100)
     return () => clearInterval(id)
   }, [status])
+
+  useEffect(() => {
+    const apple = /Mac|iPhone|iPad/.test(navigator.platform)
+    if (apple) setShortcut('⌘ Enter')
+  }, [])
+
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      const images = Array.from(event.clipboardData?.files ?? []).filter(
+        (file) => file.type.startsWith('image/'),
+      )
+      if (images.length === 0) return
+      event.preventDefault()
+      void addFiles(images)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || event.isComposing) return
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (statusRef.current === 'running') return
+      event.preventDefault()
+      runRef.current()
+    }
+    window.addEventListener('paste', onPaste)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('paste', onPaste)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [addFiles])
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -255,11 +288,11 @@ function App() {
 
   const run = async () => {
     if (attachments.length === 0) {
-      pushToast('error', 'Add at least one image.')
+      pushToast('error', 'Add an image.')
       return
     }
     if (!prompt.trim()) {
-      pushToast('error', 'Describe the edit you want.')
+      pushToast('error', 'Describe the change.')
       return
     }
 
@@ -310,7 +343,17 @@ function App() {
     pushToast('success', 'Download started.')
   }
 
+  runRef.current = () => {
+    void run()
+  }
+
   const preview = attachments[0]?.previewUrl ?? ''
+  const editReason =
+    attachments.length === 0
+      ? 'Add an image'
+      : !prompt.trim()
+        ? 'Describe the change'
+        : null
   const full = attachments.length >= MAX_IMAGES
   const statusLabel =
     status === 'running'
@@ -477,20 +520,23 @@ function App() {
               <button
                 type="button"
                 onClick={() => void run()}
-                disabled={status === 'running'}
+                disabled={status === 'running' || editReason !== null}
                 className="btn-primary"
               >
                 <span>
                   {status === 'running'
                     ? `Editing… ${elapsed.toFixed(1)}s`
-                    : 'Edit image'}
+                    : (editReason ?? 'Edit image')}
                 </span>
-                {status !== 'running' && (
+                {status !== 'running' && !editReason && (
                   <span className="arrow" aria-hidden="true">
                     →
                   </span>
                 )}
               </button>
+              {!editReason && status !== 'running' && (
+                <p className="shortcut-hint">{shortcut} to edit</p>
+              )}
             </div>
           </section>
 

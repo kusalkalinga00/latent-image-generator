@@ -709,6 +709,13 @@ input[type="range"] {
   padding-top: 0.25rem;
 }
 
+.shortcut-hint {
+  margin: 0.4rem 0 0;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
 .toaster {
   position: fixed;
   z-index: 70;
