@@ -406,6 +406,14 @@ function App() {
     pushToast('info', 'Edit cancelled.')
   }
 
+  const clearEditor = () => {
+    runId.current += 1
+    setPrompt('')
+    setResultUrl('')
+    setResultMeta('')
+    setStatus('idle')
+  }
+
   const continueFromResult = async () => {
     if (!resultUrl) return
     try {
@@ -544,7 +552,21 @@ function App() {
               </ul>
             )}
 
-            <h2 className="step-label">2 · What should change?</h2>
+            <div className="step-row">
+              <h2 className="step-label">2 · What should change?</h2>
+              {(prompt.length > 0 ||
+                resultUrl.length > 0 ||
+                status === 'running' ||
+                status === 'error') && (
+                <button
+                  type="button"
+                  onClick={clearEditor}
+                  className="inline-flex min-h-11 items-center text-xs font-medium text-[var(--ink-soft)] underline-offset-2 hover:text-[var(--ink)] hover:underline"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
             <textarea
               ref={promptRef}
               value={prompt}
