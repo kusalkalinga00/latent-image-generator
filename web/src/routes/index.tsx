@@ -11,6 +11,29 @@ const MAX_IMAGES = 3
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 const MAX_EDGE = 1536 // the model works around 1MP; larger just costs GPU seconds
 
+const WAIT_STEPS = ['Starting a GPU', 'Loading the model', 'Editing'] as const
+
+function waitStep(elapsed: number, warmed: boolean) {
+  if (warmed || elapsed >= 30) return 2
+  if (elapsed >= 8) return 1
+  return 0
+}
+
+function waitProgress(elapsed: number, warmed: boolean) {
+  if (warmed) return Math.min(92, 18 + (elapsed / 4) * 74)
+  if (elapsed < 8) return (elapsed / 8) * 30
+  if (elapsed < 30) return 30 + ((elapsed - 8) / 22) * 40
+  return Math.min(92, 70 + ((elapsed - 30) / 20) * 22)
+}
+
+function waitDetail(step: number, warmed: boolean) {
+  if (warmed || step === 2) return 'The GPU is working on your image.'
+  if (step === 1) {
+    return 'The model is loading. About 30 seconds is normal the first time.'
+  }
+  return 'A GPU is starting. The first edit takes longer than the ones after it.'
+}
+
 const EXAMPLES = [
   'Make it night time with warm street lights',
   'Put them in a cozy cafe, keep their faces the same',
@@ -200,6 +223,9 @@ function App() {
   const promptRef = useRef<HTMLTextAreaElement>(null)
   const runRef = useRef<() => void>(() => {})
   const statusRef = useRef(status)
+  const resultRef = useRef<HTMLElement>(null)
+  const runId = useRef(0)
+  const warmed = useRef(false)
   statusRef.current = status
   const [shortcut, setShortcut] = useState('Ctrl+Enter')
 
@@ -329,10 +355,11 @@ function App() {
       pushToast('error', 'Describe the change.')
       return
     }
+    if (statusRef.current === 'running') return
 
+    const id = ++runId.current
     setStatus('running')
-    setResultUrl('')
-    setResultMeta('')
+    resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 
     try {
       const out = await editImage({
@@ -344,12 +371,15 @@ function App() {
         },
       })
 
+      if (runId.current !== id) return
+
       if (!out.ok || !out.imageBase64) {
         pushToast('error', out.error ?? 'The edit did not finish. Try again.')
         setStatus('error')
         return
       }
 
+      warmed.current = true
       setResultUrl(`data:image/png;base64,${out.imageBase64}`)
       setResultMeta(`${out.seconds}s on the GPU · ${out.steps} steps`)
       setStatus('done')
@@ -358,6 +388,7 @@ function App() {
         out.seconds ? `Edit ready in ${out.seconds}s.` : 'Edit ready.',
       )
     } catch (err) {
+      if (runId.current !== id) return
       const message =
         err instanceof Error ? err.message : 'The edit did not finish.'
       const friendly = /fetch|network|load failed/i.test(message)
@@ -366,6 +397,12 @@ function App() {
       pushToast('error', friendly)
       setStatus('error')
     }
+  }
+
+  const cancelEdit = () => {
+    runId.current += 1
+    setStatus(resultUrl ? 'done' : 'idle')
+    pushToast('info', 'Edit cancelled.')
   }
 
   const continueFromResult = async () => {
@@ -402,6 +439,8 @@ function App() {
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
+  const phase = waitStep(elapsed, warmed.current)
+  const progress = Math.round(waitProgress(elapsed, warmed.current))
   const editReason =
     attachments.length === 0
       ? 'Add an image'
@@ -411,7 +450,7 @@ function App() {
   const full = attachments.length >= MAX_IMAGES
   const statusLabel =
     status === 'running'
-      ? `Developing · ${elapsed.toFixed(0)}s`
+      ? `${WAIT_STEPS[phase]} · ${elapsed.toFixed(0)}s`
       : status === 'done'
         ? 'Ready'
         : status === 'error'
@@ -596,7 +635,7 @@ function App() {
           </section>
 
           {/* ---------------- 3 · result ---------------- */}
-          <section className="card rise rise-late">
+          <section ref={resultRef} className="card rise rise-late">
             <div className="step-row">
               <h2 className="step-label">3 · Result</h2>
               <span
@@ -621,22 +660,48 @@ function App() {
                     />
                   )}
                   <div className="develop-inner">
-                    <div className="develop-lights" aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                    </div>
+                    <ol className="wait-steps">
+                      {WAIT_STEPS.map((label, index) => (
+                        <li
+                          key={label}
+                          className={
+                            index === phase
+                              ? 'is-current'
+                              : index < phase
+                                ? 'is-done'
+                                : undefined
+                          }
+                        >
+                          {label}
+                        </li>
+                      ))}
+                    </ol>
                     <p className="m-0 text-sm font-medium text-[var(--ink)]">
-                      Developing — {elapsed.toFixed(1)}s
+                      {WAIT_STEPS[phase]} — {elapsed.toFixed(0)}s
                     </p>
-                    <div className="develop-meter" aria-hidden="true">
-                      <i />
+                    <div
+                      className="develop-meter"
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={progress}
+                      aria-label={WAIT_STEPS[phase]}
+                    >
+                      <i
+                        className="is-fill"
+                        style={{ width: `${progress}%` }}
+                      />
                     </div>
                     <p className="m-0 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-                      {elapsed < 30
-                        ? 'If this is the first edit in a while, a GPU is starting and loading the model. About 30 seconds is normal.'
-                        : 'The GPU is hot now. Your edit is developing.'}
+                      {waitDetail(phase, warmed.current)}
                     </p>
+                    <button
+                      type="button"
+                      onClick={cancelEdit}
+                      className="btn-quiet h-10 px-4 text-xs font-medium"
+                    >
+                      Cancel
+                    </button>
                   </div>
                 </div>
               ) : status === 'done' && resultUrl ? (

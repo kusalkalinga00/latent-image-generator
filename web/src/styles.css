@@ -684,6 +684,39 @@ input[type="range"] {
   animation: meter-slide 1.6s ease-in-out infinite;
 }
 
+.develop-meter i.is-fill {
+  animation: none;
+  background: var(--ink);
+  transition: width 180ms linear;
+}
+
+.wait-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wait-steps li {
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.wait-steps li.is-current {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.wait-steps li.is-done {
+  color: var(--ink);
+  opacity: 0.55;
+}
+
 .field {
   width: 100%;
   resize: vertical;
