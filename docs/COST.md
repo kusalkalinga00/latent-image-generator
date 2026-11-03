@@ -1,8 +1,18 @@
 # Cost
 
-Modal bills per second of actual compute. There is no idle charge, which is what
-makes a $30/month credit viable for a 20B image model — but only if the design
-respects it.
+Modal bills per second of a **live container**. Two things follow that people
+usually get wrong:
+
+1. **Loading the model is billed.** A cold start is not free waiting; it is 30–70
+   seconds of H100 at full rate.
+2. **The idle window after the last request is billed too.** Modal's pricing FAQ:
+   containers stay alive "for 60 seconds after the last inputs before we shut them
+   down, which we also bill for". At H100 rates that minute costs **$0.066** — more
+   than the work it preceded.
+
+So the cost of a request is `load (if cold) + work + a minute of idle`, unless
+several requests share the same minute. That one sentence explains every number
+below, and it is why batching changes the monthly figure by an order of magnitude.
 
 ## Rates (verified)
 
@@ -19,38 +29,36 @@ From Modal's pricing page, per second and per derived hour:
 | Memory | — | $0.008 / GiB |
 | Volume storage | — | $0.09 / GiB-month, **first 1 TiB free** |
 
-The Starter plan includes **$30/month of compute**. Storage for a 57.7 GB
-checkpoint therefore costs **$0.00** — it sits three orders of magnitude under the
-free allowance.
+The Starter plan includes **$30/month of compute**. Both checkpoints are ~54 GiB
+each (38.05 GiB transformer + 15.45 GiB text encoder), so the Volume holds ~108 GiB
+— still more than an order of magnitude under the free allowance, so it costs
+**$0.00**.
 
 ## What $30 buys
 
-| GPU | GPU-hours | Roughly |
-|---|---|---|
-| L40S 48 GB | 15.4 hr | |
-| A100 40 GB | 14.3 hr | |
-| A100 80 GB | 12.0 hr | |
-| **H100 80 GB** | **7.6 hr** | this app |
-| B200 180 GB | 4.8 hr | |
+| GPU | GPU-hours |
+|---|---|
+| L40S 48 GB | 15.4 hr |
+| A100 40 GB | 14.3 hr |
+| A100 80 GB | 12.0 hr |
+| **H100 80 GB** | **7.6 hr** — this app |
+| B200 180 GB | 4.8 hr |
 
-7.6 H100-hours per month is roughly **15 minutes of GPU time per day**. That is
-generous for personal use and thin for anything shared, which sets the design.
+7.6 H100-hours per month is roughly **15 minutes of GPU time per day**. Generous for
+personal use, thin for anything shared, which is what sets the design.
 
-## The only thing that matters: how long the GPU is alive
+## The three decisions that keep it there
 
-Three decisions, each load-bearing:
-
-1. **`max_containers=1`** — a personal tool must never run two H100s at once. Two
-   concurrent requests would otherwise double a bill silently.
+1. **`max_containers=1` per class** — a personal tool must never run two H100s at
+   once. Two concurrent requests would otherwise double a bill silently.
 2. **`scaledown_window=60`** — release the GPU a minute after the last edit.
-3. **The Gradio UI runs on a CPU-only container**, calling the GPU over Modal RPC.
+3. **The UI is not in a GPU container.** It is a TanStack Start app on Vercel,
+   calling Modal over HTTPS.
 
-Decision 3 is the non-obvious one, and it is worth the paragraph. If the UI lived
-in the same container as the model, then merely *having the page open* would keep
-an H100 alive — you would be paying $3.95/hr while reading a result, or while the
-tab sat forgotten in the background. Serving the UI from a CPU container means the
-GPU is alive only while it is actually denoising. The idle browser tab costs
-cents instead of dollars.
+Decision 3 is the non-obvious one. If the UI lived with the model, merely *having
+the page open* would keep an H100 alive — $3.95/hr while reading a result, or while
+the tab sat forgotten in the background. The UI on Vercel means the GPU is alive
+only while it is denoising; an idle browser tab costs nothing here.
 
 ### Cost of holding a GPU warm
 
@@ -60,64 +68,82 @@ cents instead of dollars.
 | 1 × L40S | $1,424 |
 | 1 × A100 80 GB | $1,825 |
 
-All of these exceed the $30 credit by 47×–95×. **Scale-to-zero is not a
-preference here, it is the only configuration that fits the budget.**
+All of these exceed the $30 credit by 47×–95×. **Scale-to-zero is not a preference
+here, it is the only configuration that fits the budget.**
 
-## What it costs per edit
+## Measured
 
-Measured on an H100 with `inputs/ref.png` (896×1184, 40 steps):
+H100, one container, real runs:
 
-| Phase | Measured |
-|---|---|
-| Container boot | ~1–2 s (Modal's claim; not separately instrumented) |
-| Load 53.76 GiB of weights into VRAM | **28.6 s** |
-| 40-step edit at 896×1184 | **33.5 s** |
-| **First edit of a session** | **~62 s → $0.068** |
-| **Each further edit while warm** | **~34 s → $0.037** |
+| | Work | Container time | Cost |
+|---|---|---|---|
+| Edit, warm, in a batch | 3.6–5.3 s | work only | **$0.004** |
+| Edit, warm, isolated | 3.6–5.3 s | work + 60 s idle | **$0.070** |
+| Edit, cold, isolated | 31.7 s load + work | 95 s | **$0.105** |
+| Generate, warm, in a batch | 3.3–3.9 s | work only | **$0.0043** |
+| Generate, warm, isolated | 3.3–3.9 s | work + 60 s idle | **$0.070** |
+| Generate, cold, isolated | 76.8 s wall (3.9 s denoise) | 134 s | **$0.147** |
 
-At those rates $30/month is roughly:
+Two measurement notes worth keeping:
 
-| Usage pattern | Edits per month |
-|---|---|
-| Every edit a cold start | ~440 |
-| Warm batches of 5 | ~700 |
-| Warm batches of 20 | ~780 |
+- **A cold generation costs ~40% more than a cold edit** on the runs measured here
+  (76.8 s wall against ~35 s), even though the two checkpoints are the same size.
+  The load figures in the logs are the ones to trust, not the assumption that a
+  bigger number means a bigger model.
+- **The first inference on a fresh container is slower than the steady state**
+  (5.29 s versus 3.61 s for the same edit) because CUDA kernels warm up. Quote the
+  first number for latency, the second for throughput.
 
-That is the honest shape of it: **cold starts are about half the cost of a single
-edit**, which is why batching several edits into one sitting roughly halves the
-per-edit price. The load is paid once per container, not once per edit.
+The `pipeline + 4-step LoRA on GPU in Ns` line is logged on every cold start, so the
+load figure is checkable rather than remembered.
 
-The `pipeline on GPU in 28.6s` line is logged on every cold start, so this number
-is checkable rather than remembered.
+## What that means per month
 
-### The cost of the debugging that got us here
+| Usage pattern | Edits/month | Generations/month |
+|---|---|---|
+| Every request isolated (cold start each) | ~286 | ~204 |
+| Batches of 5 in one sitting | ~1,240 | ~910 |
+| Batches of 20 in one sitting | ~3,330 | ~2,600 |
+| Marginal cost, GPU already warm | ~7,500 (**$0.004 each**) | ~7,000 (**$0.0043 each**) |
 
-Two failed H100 attempts (a missing `torchvision`, then a crash-loop against a
-stale deployment) plus one successful run. The crash-loop is the one worth
-knowing about: a container that repeatedly fails to start still bills for the
-seconds it runs, so a loop that *looks* like a slow cold start is quietly
-spending money. It was caught and the deployment replaced, but the pattern is
-worth recognising. Exact spend is in the Modal dashboard, not here.
+The chip in the app shows the last row, because that answers "how many more can I
+do" — but it assumes a warm GPU. Plan with the batch rows. **The gap between 286 and
+3,330 is entirely the 60-second idle tail**, and it is the most useful thing to know
+about running this app.
+
+## What a shared link would cost
+
+There is no rate limit. Ten people making one edit each within a minute is one warm
+container doing ten edits — cheap. The same ten spread over an hour is ten cold
+starts plus ten idle minutes: roughly **$1.05 for ten edits**, and $30 lasts about a
+week of casual sharing.
+
+Before making this public, add a per-IP limit to the server function. Nothing else
+in the design protects the credit.
+
+## The cost of the debugging that got here
+
+Failures that cost GPU time, all now checked by `check_env` on a CPU container for
+cents: a missing `torchvision`, a missing `peft`, a processor that needs
+`subfolder="processor"`, and a crash-loop against a stale deployment that *looked*
+like a slow cold start while quietly billing. Exact spend is in the Modal dashboard,
+not here.
 
 ## Cheaper configurations, if you need more headroom
 
-In rough order of effect:
-
-| Change | Effect | Cost |
+| Change | Effect | Trade |
 |---|---|---|
-| Fewer steps (40 → 20) | ~halves per-edit GPU time | Some prompt-adherence loss |
-| Use `Qwen-Image-Lightning` LoRA | 4 steps instead of 40 — the single biggest lever | Distilled; mild quality trade |
-| L40S instead of H100 | $1.95/hr vs $3.95 — 2× the hours | Slower per step; 48 GB needs an FP8 quant of the 40 GB transformer |
+| Batch your edits | the idle minute is amortised instead of paid per request | nothing — it is free |
+| `scaledown_window=10` | saves ~$0.05 per isolated request | every revisit pays a cold start |
+| L40S instead of H100 | $1.95/hr vs $3.95 — twice the hours | slower per step; 48 GB needs an FP8 quant |
 | A100 80 GB | $2.50/hr vs $3.95 | ~40% slower than H100 |
+| 8-step LoRAs instead of 4 | — | slower per image, marginally steadier |
 
-`Qwen-Image-Lightning` is worth knowing about: it is linked from Qwen's own
-repository and claims a 25× reduction in DiT NFEs. It is not wired in here because
-it changes output quality, and this app is meant to be the reference
-configuration first.
+The 4-step distillation is already in use: against 40 steps it is **9.3× faster**
+(3.61 s versus 33.53 s for the same image), and it is the single change that made a
+public app viable at all.
 
 ## Watching the spend
-
-Modal's dashboard shows per-app GPU-seconds and cost. Two useful checks:
 
 ```sh
 # what the Volume holds (free, but proves the cache is intact)
@@ -127,13 +153,13 @@ uv run --package modal-app modal run modal_app/src/modal_app/app.py::volume_stat
 uv run --package modal-app modal app list
 ```
 
-A runaway bill in this design can only come from one of two things: `max_containers`
-being raised, or something keeping a container busy. Both are visible in the app's
-Containers tab, and both are worth checking before blaming the model.
+A runaway bill in this design can only come from `max_containers` being raised,
+`scaledown_window` being lengthened, or something keeping containers busy. All three
+are visible in the app's Containers tab, and worth checking before blaming the model.
 
-## A note on the plan we are on
+## A note on the plan
 
 Starter includes $30/month, 3 seats, 100 containers, 10 GPU concurrency, and 1-day
-log retention. **The 1-day log retention is the one limitation that matters** for
+log retention. **The 1-day log retention is the limitation that matters** when
 debugging a failed edit a week later — the logs are gone. Persisting anything
 important to the Volume (or to the repo) is the workaround.

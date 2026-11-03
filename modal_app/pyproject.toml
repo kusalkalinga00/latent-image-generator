@@ -1,7 +1,7 @@
 [project]
 name = "modal-app"
 version = "0.1.0"
-description = "Modal deployment of Qwen/Qwen-Image-Edit-2511 (Gradio UI + JSON endpoint)."
+description = "Modal GPU service for image editing and text-to-image: Qwen-Image-Edit-2511 and Qwen-Image-2512, JSON API only."
 readme = "README.md"
 authors = [
     { name = "Kusal", email = "kusalkalingainfo@gmail.com" }
