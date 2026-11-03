@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { refreshCredit } from '#/lib/credit-store'
 import { editImage } from '#/lib/edit'
 import { pushToast } from '#/lib/toast'
@@ -17,6 +18,33 @@ const STEPS = 4
 
 const WAIT_STEPS = ['Starting a GPU', 'Loading the model', 'Editing'] as const
 
+const DOT_COLS = 26
+const DOT_ROWS = 15
+const DOT_TOTAL = DOT_COLS * DOT_ROWS
+
+/**
+ * The order dots light up in.
+ *
+ * A fixed shuffle, not Math.random(): the field has to look scattered while every
+ * tick keeps the same arrangement, or the picture reshuffles itself ten times a
+ * second and reads as noise instead of progress.
+ */
+const DOT_ORDER = (() => {
+  const order = Array.from({ length: DOT_TOTAL }, (_, i) => i)
+  let seed = 7
+  const next = () => {
+    seed = (seed * 16807) % 2147483647
+    return seed / 2147483647
+  }
+  for (let i = order.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(next() * (i + 1))
+    const swap = order[i]
+    order[i] = order[j]
+    order[j] = swap
+  }
+  return order
+})()
+
 function waitStep(elapsed: number, warmed: boolean) {
   if (warmed || elapsed >= 30) return 2
   if (elapsed >= 8) return 1
@@ -24,16 +52,12 @@ function waitStep(elapsed: number, warmed: boolean) {
 }
 
 function waitProgress(elapsed: number, warmed: boolean) {
+  // Never reaches 100: this is an estimate of a wait whose length depends on a
+  // cold start, so it stops short and the image arriving is the real completion.
   if (warmed) return Math.min(92, 18 + (elapsed / 4) * 74)
   if (elapsed < 8) return (elapsed / 8) * 30
   if (elapsed < 30) return 30 + ((elapsed - 8) / 22) * 40
   return Math.min(92, 70 + ((elapsed - 30) / 20) * 22)
-}
-
-function waitDetail(step: number, warmed: boolean) {
-  if (warmed || step === 2) return 'The GPU is working on your image.'
-  if (step === 1) return 'About 30 seconds is normal the first time.'
-  return 'A GPU is starting. The first edit is the slow one.'
 }
 
 // Short enough to scan as chips; the point is to show the range of edits, not to
@@ -150,54 +174,38 @@ function Compare({ before, after }: { before: string; after: string }) {
   )
 }
 
-function Developing({
-  elapsed,
-  warmed,
-  onStop,
-}: {
-  elapsed: number
-  warmed: boolean
-  onStop: () => void
-}) {
+/**
+ * The wait, drawn as a field of dots that fills in.
+ *
+ * A spinner says something is happening; this says how much. It also gives the
+ * cold start somewhere to live: the caption names the phase, so 30 seconds of
+ * loading reads as a step rather than a stall.
+ */
+function Sketching({ elapsed, warmed }: { elapsed: number; warmed: boolean }) {
   const phase = waitStep(elapsed, warmed)
   const progress = Math.round(waitProgress(elapsed, warmed))
+  const filled = Math.round((DOT_TOTAL * progress) / 100)
 
   return (
-    <div className="developing">
-      <div className="develop-panel">
-        <p className="develop-elapsed">
-          {elapsed.toFixed(0)}s<span>elapsed</span>
-        </p>
-        <ol className="develop-phases">
-          {WAIT_STEPS.map((label, index) => (
-            <li
-              key={label}
-              className={
-                index === phase
-                  ? 'is-current'
-                  : index < phase
-                    ? 'is-done'
-                    : undefined
-              }
-            >
-              {label}
-            </li>
-          ))}
-        </ol>
+    <div className="matrix-block">
+      <p className="matrix-caption">
+        {WAIT_STEPS[phase]} · {elapsed.toFixed(0)}s
+      </p>
+      <div className="matrix-field">
         <div
-          className="develop-meter"
+          className="matrix"
+          style={{ '--cols': DOT_COLS } as CSSProperties}
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={progress}
-          aria-label={WAIT_STEPS[phase]}
+          aria-label={`${WAIT_STEPS[phase]}, ${progress}%`}
         >
-          <i style={{ width: `${progress}%` }} />
+          {DOT_ORDER.map((rank, index) => (
+            <i key={index} className={rank < filled ? 'on' : undefined} />
+          ))}
         </div>
-        <p className="develop-note">{waitDetail(phase, warmed)}</p>
-        <button type="button" onClick={onStop} className="develop-cancel">
-          Stop waiting
-        </button>
+        <span className="matrix-pct">{progress}%</span>
       </div>
     </div>
   )
@@ -207,7 +215,7 @@ function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [prompt, setPrompt] = useState('')
   const [seed, setSeed] = useState(0)
-  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [showSeed, setShowSeed] = useState(false)
 
   const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>(
     'idle',
@@ -215,9 +223,9 @@ function App() {
   const [resultUrl, setResultUrl] = useState('')
   const [resultMeta, setResultMeta] = useState('')
   const [errorText, setErrorText] = useState('')
+  const [lastPrompt, setLastPrompt] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
-  const [shortcut, setShortcut] = useState('Ctrl')
 
   const inputRef = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
@@ -238,17 +246,12 @@ function App() {
     return () => clearInterval(id)
   }, [status])
 
-  useEffect(() => {
-    const apple = /Mac|iPhone|iPad/.test(navigator.platform)
-    if (apple) setShortcut('⌘')
-  }, [])
-
   // Grow the prompt with its content, up to the cap in CSS.
   useEffect(() => {
     const el = promptRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(140, el.scrollHeight)}px`
+    el.style.height = `${Math.min(132, el.scrollHeight)}px`
   }, [prompt])
 
   const addFiles = useCallback(
@@ -291,6 +294,7 @@ function App() {
         setResultUrl('')
         setResultMeta('')
         setErrorText('')
+        setLastPrompt('')
         setStatus('idle')
       }
       if (incoming.length > room) {
@@ -346,6 +350,7 @@ function App() {
     setAttachments((prev) => prev.filter((a) => a.id !== id))
     setResultUrl('')
     setResultMeta('')
+    setLastPrompt('')
     setStatus('idle')
   }
 
@@ -361,15 +366,17 @@ function App() {
     if (statusRef.current === 'running') return
 
     const id = ++runId.current
+    const instruction = prompt.trim()
     setElapsed(0)
     setErrorText('')
+    setLastPrompt(instruction)
     setStatus('running')
 
     try {
       const out = await editImage({
         data: {
           imagesBase64: attachments.map((a) => a.base64),
-          prompt: prompt.trim(),
+          prompt: instruction,
           steps: STEPS,
           seed,
         },
@@ -425,6 +432,7 @@ function App() {
     setResultUrl('')
     setResultMeta('')
     setErrorText('')
+    setLastPrompt('')
     setStatus('idle')
   }
 
@@ -439,6 +447,7 @@ function App() {
       setPrompt('')
       setResultUrl('')
       setResultMeta('')
+      setLastPrompt('')
       setStatus('idle')
       pushToast('info', 'The result is now the image in the bar below.')
       promptRef.current?.focus()
@@ -465,12 +474,7 @@ function App() {
   const preview = attachments[0]?.previewUrl ?? ''
   const running = status === 'running'
   const full = attachments.length >= MAX_IMAGES
-  const editReason =
-    attachments.length === 0
-      ? 'Add an image'
-      : !prompt.trim()
-        ? 'Describe the change'
-        : null
+  const done = status === 'done' && Boolean(resultUrl)
 
   return (
     <>
@@ -488,54 +492,69 @@ function App() {
         }}
       >
         {preview ? (
-          <figure className="frame">
+          <div className="thread">
+            {lastPrompt && <p className="bubble">{lastPrompt}</p>}
+
             {running ? (
-              <>
-                <img src={preview} alt="Your image" />
-                <Developing
-                  elapsed={elapsed}
-                  warmed={warmed.current}
-                  onStop={stopWaiting}
-                />
-              </>
-            ) : status === 'done' && resultUrl ? (
-              <Compare before={preview} after={resultUrl} />
+              <Sketching elapsed={elapsed} warmed={warmed.current} />
             ) : (
               <>
-                <img src={preview} alt={attachments[0]?.name ?? 'Your image'} />
-                <span className="stage-tag">Original</span>
+                <figure className="frame">
+                  {done ? (
+                    <Compare before={preview} after={resultUrl} />
+                  ) : (
+                    <>
+                      <img
+                        src={preview}
+                        alt={attachments[0]?.name ?? 'Your image'}
+                      />
+                      <span className="stage-tag">Original</span>
+                    </>
+                  )}
+                </figure>
+
+                {done && (
+                  <div className="stage-bar">
+                    <span>{resultMeta}</span>
+                    <span className="acts">
+                      <button
+                        type="button"
+                        className="btn is-primary"
+                        onClick={download}
+                      >
+                        Download PNG
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => void continueFromResult()}
+                      >
+                        Edit this result
+                      </button>
+                      <button
+                        type="button"
+                        className="link-btn"
+                        onClick={clearEditor}
+                      >
+                        Start over
+                      </button>
+                    </span>
+                  </div>
+                )}
               </>
             )}
-          </figure>
+          </div>
         ) : (
           <section className="empty">
-            <svg
-              className="empty-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              aria-hidden="true"
-            >
-              <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
-              <circle
-                cx="8.6"
-                cy="10"
-                r="1.5"
-                fill="currentColor"
-                stroke="none"
-              />
-              <path d="M21 16.5l-5.4-5.2L7 19.5" strokeLinecap="round" />
-            </svg>
-            <h1>Drop a photo to start</h1>
+            <h1>What are we editing?</h1>
             <p>
-              Drag one here, paste one, or choose a file. Nothing is stored, and
-              nothing runs until you press edit.
+              Drop a photo anywhere on this canvas, paste one, or choose a file.
+              Then describe the change in plain language.
             </p>
             <div className="row">
               <button
                 type="button"
-                className="btn-primary"
+                className="btn is-primary"
                 onClick={() => inputRef.current?.click()}
               >
                 Choose an image
@@ -552,182 +571,162 @@ function App() {
         )}
       </main>
 
-      {status === 'done' && resultUrl && (
-        <div className="stage-bar">
-          <span>
-            <span className="meta-time">{resultMeta} · </span>
-            <button type="button" onClick={clearEditor} className="link-btn">
-              Start over
+      <div className="dock">
+        {status === 'error' && errorText && (
+          <div className="notice is-error" role="alert">
+            <span className="dot" aria-hidden="true" />
+            <span className="grow">{errorText}</span>
+            <button type="button" className="btn" onClick={() => void run()}>
+              Try again
             </button>
-          </span>
-          <span className="acts">
+          </div>
+        )}
+
+        {attachments.length > 0 && (
+          <ul className="thumbs">
+            {attachments.map((a) => (
+              <li key={a.id} className="thumb">
+                <img src={a.previewUrl} alt={a.name} />
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(a.id)}
+                  aria-label={`Remove ${a.name}`}
+                  className="thumb-remove"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+            {!full && (
+              <li>
+                <button
+                  type="button"
+                  onClick={() => inputRef.current?.click()}
+                  className="thumb thumb-add"
+                  aria-label="Add another image"
+                >
+                  +
+                </button>
+              </li>
+            )}
+            <li className="thumbs-meta">
+              {showSeed ? (
+                <label className="seed">
+                  <span>Seed</span>
+                  <input
+                    type="number"
+                    value={seed}
+                    onChange={(e) => setSeed(Number(e.target.value))}
+                    aria-label="Seed"
+                  />
+                </label>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowSeed(true)}
+                  className="chip"
+                  title="Same seed and same input gives the same result"
+                >
+                  Seed
+                </button>
+              )}
+            </li>
+          </ul>
+        )}
+
+        {!prompt.trim() && !running && (
+          <div className="suggestions">
+            {EXAMPLES.map((example) => (
+              <button
+                key={example}
+                type="button"
+                onClick={() => {
+                  setPrompt(example)
+                  promptRef.current?.focus()
+                }}
+                className="chip"
+              >
+                {example}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <form
+          className="composer"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void run()
+          }}
+        >
+          <button
+            type="button"
+            className="attach"
+            aria-label="Add an image"
+            onClick={() => inputRef.current?.click()}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              aria-hidden="true"
+            >
+              <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+            </svg>
+          </button>
+
+          <textarea
+            ref={promptRef}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={1}
+            placeholder="Describe the change…"
+            className="field"
+            aria-label="Describe the change"
+            readOnly={running}
+          />
+
+          {running ? (
             <button
               type="button"
-              className="btn btn-ghost"
-              onClick={() => void continueFromResult()}
+              className="send"
+              onClick={stopWaiting}
+              aria-label="Stop waiting"
+              title="This stops the wait. Modal cannot cancel a call already running, so the GPU may still finish and bill."
             >
-              Edit this result
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="7.5" y="7.5" width="9" height="9" rx="2" />
+              </svg>
             </button>
-            <button type="button" className="btn" onClick={download}>
-              Download PNG
+          ) : (
+            <button
+              type="submit"
+              className="send"
+              disabled={!prompt.trim() || attachments.length === 0}
+              aria-label="Edit the image"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                aria-hidden="true"
+              >
+                <path
+                  d="M12 19V5M5.5 11.5L12 5l6.5 6.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
-          </span>
-        </div>
-      )}
+          )}
+        </form>
 
-      {status === 'error' && errorText && (
-        <div className="notice is-error" role="alert">
-          <span className="dot" aria-hidden="true" />
-          <span className="grow">{errorText}</span>
-          <button type="button" onClick={() => void run()} className="btn">
-            Try again
-          </button>
-        </div>
-      )}
-
-      {attachments.length > 0 && (
-        <div className="composer-wrap">
-          <form
-            className={`composer${running ? ' is-busy' : ''}`}
-            onSubmit={(event) => {
-              event.preventDefault()
-              void run()
-            }}
-          >
-            {attachments.length > 0 && (
-              <ul className="thumbs">
-                {attachments.map((a) => (
-                  <li key={a.id} className="thumb">
-                    <img src={a.previewUrl} alt={a.name} />
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(a.id)}
-                      aria-label={`Remove ${a.name}`}
-                      className="thumb-remove"
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-                {!full && (
-                  <li>
-                    <button
-                      type="button"
-                      onClick={() => inputRef.current?.click()}
-                      className="thumb thumb-add"
-                      aria-label="Add another image"
-                    >
-                      +
-                    </button>
-                  </li>
-                )}
-                <li className="thumbs-end">
-                  {showAdvanced ? (
-                    <label className="seed">
-                      <span>Seed</span>
-                      <input
-                        type="number"
-                        value={seed}
-                        onChange={(e) => setSeed(Number(e.target.value))}
-                        aria-label="Seed"
-                      />
-                    </label>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setShowAdvanced(true)}
-                      className="chip"
-                      title="Same seed and same input gives the same result"
-                    >
-                      Seed
-                    </button>
-                  )}
-                </li>
-              </ul>
-            )}
-
-            <div className="field-wrap">
-              <textarea
-                ref={promptRef}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                rows={1}
-                placeholder="Describe the change…"
-                className="field"
-                aria-label="Describe the change"
-                readOnly={running}
-              />
-              {!running && (
-                <span className="field-hint" aria-hidden="true">
-                  <kbd>{shortcut}</kbd>
-                  <kbd>↵</kbd>
-                </span>
-              )}
-            </div>
-
-            <div className="composer-foot">
-              <div className="chips">
-                {EXAMPLES.map((example) => (
-                  <button
-                    key={example}
-                    type="button"
-                    onClick={() => {
-                      setPrompt(example)
-                      promptRef.current?.focus()
-                    }}
-                    className={`chip${prompt.trim() === example ? ' is-active' : ''}`}
-                  >
-                    {example}
-                  </button>
-                ))}
-              </div>
-
-              <div className="composer-actions">
-                {running ? (
-                  <button
-                    type="button"
-                    className="btn-primary is-stop"
-                    onClick={stopWaiting}
-                    title="This stops the wait. Modal cannot cancel a call already running, so the GPU may still finish and bill."
-                  >
-                    Stop waiting
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.2"
-                      aria-hidden="true"
-                    >
-                      <rect x="7" y="7" width="10" height="10" rx="1.6" />
-                    </svg>
-                  </button>
-                ) : (
-                  <button
-                    type="submit"
-                    className="btn-primary"
-                    disabled={editReason !== null}
-                  >
-                    Edit
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.2"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M5 12h13M12 5l7 7-7 7"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </button>
-                )}
-              </div>
-            </div>
-          </form>
-        </div>
-      )}
+        <p className="disclaimer">
+          Runs on a GPU on demand · <b>images are not stored</b> · ⌘↵ to edit
+        </p>
+      </div>
 
       <input
         ref={inputRef}
