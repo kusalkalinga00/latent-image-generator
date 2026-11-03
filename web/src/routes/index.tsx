@@ -2,7 +2,8 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { refreshCredit } from '#/lib/credit-store'
-import { editImage } from '#/lib/edit'
+import type { Aspect } from '#/lib/edit'
+import { ASPECT_LABELS, editImage, generateImage } from '#/lib/edit'
 import { pushToast } from '#/lib/toast'
 
 export const Route = createFileRoute('/')({ component: App })
@@ -224,6 +225,9 @@ function App() {
   const [resultMeta, setResultMeta] = useState('')
   const [errorText, setErrorText] = useState('')
   const [lastPrompt, setLastPrompt] = useState('')
+  // What the picture on the stage is: an edited photo, or one from nothing.
+  const [lastMode, setLastMode] = useState<'edit' | 'generate'>('edit')
+  const [aspect, setAspect] = useState<Aspect>('1:1')
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
 
@@ -355,32 +359,35 @@ function App() {
   }
 
   const run = async () => {
-    if (attachments.length === 0) {
-      pushToast('error', 'Add an image.')
-      return
-    }
     if (!prompt.trim()) {
-      pushToast('error', 'Describe the change.')
+      pushToast('error', 'Describe what you want.')
       return
     }
     if (statusRef.current === 'running') return
 
     const id = ++runId.current
     const instruction = prompt.trim()
+    const mode = attachments.length > 0 ? 'edit' : 'generate'
     setElapsed(0)
     setErrorText('')
     setLastPrompt(instruction)
+    setLastMode(mode)
     setStatus('running')
 
     try {
-      const out = await editImage({
-        data: {
-          imagesBase64: attachments.map((a) => a.base64),
-          prompt: instruction,
-          steps: STEPS,
-          seed,
-        },
-      })
+      const out =
+        mode === 'edit'
+          ? await editImage({
+              data: {
+                imagesBase64: attachments.map((a) => a.base64),
+                prompt: instruction,
+                steps: STEPS,
+                seed,
+              },
+            })
+          : await generateImage({
+              data: { prompt: instruction, steps: STEPS, seed, aspect },
+            })
 
       if (runId.current !== id) return
 
@@ -491,7 +498,7 @@ function App() {
           void addFiles(e.dataTransfer.files)
         }}
       >
-        {preview ? (
+        {preview || resultUrl || running ? (
           <div className="thread">
             {lastPrompt && <p className="bubble">{lastPrompt}</p>}
 
@@ -500,9 +507,17 @@ function App() {
             ) : (
               <>
                 <figure className="frame">
-                  {done ? (
+                  {done && preview ? (
                     <Compare before={preview} after={resultUrl} />
-                  ) : (
+                  ) : done && resultUrl ? (
+                    <>
+                      <img
+                        src={resultUrl}
+                        alt={lastPrompt || 'Generated image'}
+                      />
+                      <span className="stage-tag end">Generated</span>
+                    </>
+                  ) : preview ? (
                     <>
                       <img
                         src={preview}
@@ -510,12 +525,15 @@ function App() {
                       />
                       <span className="stage-tag">Original</span>
                     </>
-                  )}
+                  ) : null}
                 </figure>
 
                 {done && (
                   <div className="stage-bar">
-                    <span>{resultMeta}</span>
+                    <span>
+                      {lastMode === 'generate' ? 'Generated' : 'Edited'} ·{' '}
+                      {resultMeta}
+                    </span>
                     <span className="acts">
                       <button
                         type="button"
@@ -546,18 +564,18 @@ function App() {
           </div>
         ) : (
           <section className="empty">
-            <h1>What are we editing?</h1>
+            <h1>Describe an image, or drop a photo</h1>
             <p>
-              Drop a photo anywhere on this canvas, paste one, or choose a file.
-              Then describe the change in plain language.
+              With a photo, your words change it. Without one, they make
+              something new. Nothing is stored either way.
             </p>
             <div className="row">
               <button
                 type="button"
-                className="btn is-primary"
+                className="btn"
                 onClick={() => inputRef.current?.click()}
               >
-                Choose an image
+                Choose a photo
               </button>
               <button
                 type="button"
@@ -634,7 +652,7 @@ function App() {
           </ul>
         )}
 
-        {!prompt.trim() && !running && (
+        {!prompt.trim() && !running && attachments.length > 0 && (
           <div className="suggestions">
             {EXAMPLES.map((example) => (
               <button
@@ -681,11 +699,49 @@ function App() {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={1}
-            placeholder="Describe the change…"
+            placeholder={
+              attachments.length > 0
+                ? 'Describe the change…'
+                : 'Describe the image you want…'
+            }
             className="field"
-            aria-label="Describe the change"
+            aria-label={
+              attachments.length > 0
+                ? 'Describe the change'
+                : 'Describe the image'
+            }
             readOnly={running}
           />
+
+          {attachments.length === 0 && !running && (
+            <label className="shape">
+              <span className="sr-only">Image shape</span>
+              <select
+                value={aspect}
+                onChange={(e) => setAspect(e.target.value as Aspect)}
+                aria-label="Image shape"
+              >
+                {(Object.keys(ASPECT_LABELS) as Aspect[]).map((value) => (
+                  <option key={value} value={value}>
+                    {ASPECT_LABELS[value]}
+                  </option>
+                ))}
+              </select>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden="true"
+              >
+                <path
+                  d="M6 9l6 6 6-6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </label>
+          )}
 
           {running ? (
             <button
@@ -709,8 +765,10 @@ function App() {
             <button
               type="submit"
               className="send"
-              disabled={!prompt.trim() || attachments.length === 0}
-              aria-label="Edit the image"
+              disabled={!prompt.trim()}
+              aria-label={
+                attachments.length > 0 ? 'Edit the image' : 'Generate an image'
+              }
             >
               <svg
                 viewBox="0 0 24 24"
@@ -730,7 +788,7 @@ function App() {
         </form>
 
         <p className="disclaimer">
-          Runs on a GPU on demand · <b>images are not stored</b> · ⌘↵ to edit
+          Runs on a GPU on demand · <b>images are not stored</b> · ⌘↵ to send
         </p>
       </div>
 

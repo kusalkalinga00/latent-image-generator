@@ -11,6 +11,10 @@ import { createServerFn } from '@tanstack/react-start'
  * That is the whole reason the Gradio UI was dropped. A UI living inside the GPU
  * service has to authenticate its own users; a UI that proxies through a server
  * does not, because the credential never leaves the server.
+ *
+ * Two jobs share one endpoint. Modal decides between them by whether a photo
+ * arrived with the prompt - an image means edit, no image means generate - so
+ * each handler below only has to validate its own case.
  */
 
 export interface EditInput {
@@ -20,12 +24,49 @@ export interface EditInput {
   seed: number
 }
 
+export interface GenerateInput {
+  prompt: string
+  steps: number
+  seed: number
+  aspect: Aspect
+}
+
 export interface EditOutput {
   ok: boolean
+  mode?: 'edit' | 'generate'
   imageBase64?: string
   seconds?: number
   steps?: number
+  size?: [number, number]
   error?: string
+}
+
+/** The buckets the model was trained at; off-bucket sizes cost quality. */
+export const ASPECTS = [
+  '1:1',
+  '3:2',
+  '2:3',
+  '4:3',
+  '3:4',
+  '16:9',
+  '9:16',
+] as const
+export type Aspect = (typeof ASPECTS)[number]
+
+/** Only the four worth offering in a bar; the rest stay valid server-side. */
+export const ASPECT_LABELS: Partial<Record<Aspect, string>> = {
+  '1:1': 'Square',
+  '3:2': 'Wide',
+  '2:3': 'Tall',
+  '16:9': 'Cinema',
+}
+
+interface ModalPayload {
+  image_b64: string[]
+  prompt: string
+  steps: number
+  seed: number
+  aspect?: string
 }
 
 function failed(error: string): EditOutput {
@@ -38,6 +79,99 @@ function modelMessage(value: unknown) {
   if (!message || message.length > 180 || /traceback|exception/i.test(message))
     return ''
   return message
+}
+
+/**
+ * The single transport. `expect` only checks the reply, so a generate request
+ * that somehow came back as an edit fails loudly instead of being shown as one.
+ */
+async function callModal(
+  payload: ModalPayload,
+  expect: 'edit' | 'generate',
+): Promise<EditOutput> {
+  // Named *_PROXY_* deliberately. MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are the
+  // Modal CLI's own auth variables, and these are *proxy* tokens (wk-/ws-) used
+  // only for web-function auth - a different credential type entirely. Sharing
+  // the name means anyone who sources this env file breaks their `modal` CLI
+  // with "Token ID is malformed", which is exactly what happened while building
+  // this. Distinct names, distinct meaning.
+  const apiUrl = process.env.IMAGE_EDITOR_API_URL
+  const tokenId = process.env.MODAL_PROXY_TOKEN_ID
+  const tokenSecret = process.env.MODAL_PROXY_TOKEN_SECRET
+
+  if (!apiUrl || !tokenId || !tokenSecret) {
+    const missing = [
+      !apiUrl && 'IMAGE_EDITOR_API_URL',
+      !tokenId && 'MODAL_PROXY_TOKEN_ID',
+      !tokenSecret && 'MODAL_PROXY_TOKEN_SECRET',
+    ].filter(Boolean)
+    console.error('Image editor is missing configuration:', missing.join(', '))
+    return failed('The editor is not available right now.')
+  }
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // Modal's proxy auth accepts the id.secret pair as a bearer token.
+        Authorization: `Bearer ${tokenId}.${tokenSecret}`,
+      },
+      body: JSON.stringify(payload),
+    })
+
+    const text = await response.text()
+
+    if (!response.ok) {
+      // 401 here means the proxy token is wrong, not that the model failed.
+      console.error(
+        'Image editor request failed:',
+        response.status,
+        text.slice(0, 300),
+      )
+      return failed('The edit did not finish. Try again in a moment.')
+    }
+
+    let body: {
+      ok?: boolean
+      mode?: 'edit' | 'generate'
+      error?: unknown
+      image_b64?: string
+      seconds?: number
+      steps?: number
+      size?: [number, number]
+    }
+    try {
+      body = JSON.parse(text)
+    } catch (error) {
+      console.error('Image editor returned invalid JSON:', error)
+      return failed('The edit did not finish. Try again in a moment.')
+    }
+
+    if (!body.ok || !body.image_b64) {
+      const detail = modelMessage(body.error)
+      if (!detail && body.error)
+        console.error('Image editor model error:', body.error)
+      return failed(detail || 'The edit did not finish. Try again in a moment.')
+    }
+
+    if (body.mode && body.mode !== expect) {
+      console.error('Image editor answered the wrong mode:', body.mode, expect)
+      return failed('The editor answered something unexpected. Try again.')
+    }
+
+    return {
+      ok: true,
+      mode: body.mode,
+      imageBase64: body.image_b64,
+      seconds: body.seconds,
+      steps: body.steps,
+      size: body.size,
+    }
+  } catch (error) {
+    console.error('Image editor request failed:', error)
+    return failed('Could not reach the editor. Try again in a moment.')
+  }
 }
 
 export const editImage = createServerFn({ method: 'POST' })
@@ -68,88 +202,44 @@ export const editImage = createServerFn({ method: 'POST' })
       return failed('Seed must be a number.')
     }
 
-    // Named *_PROXY_* deliberately. MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are the
-    // Modal CLI's own auth variables, and these are *proxy* tokens (wk-/ws-) used
-    // only for web-function auth - a different credential type entirely. Sharing
-    // the name means anyone who sources this env file breaks their `modal` CLI
-    // with "Token ID is malformed", which is exactly what happened while building
-    // this. Distinct names, distinct meaning.
-    const apiUrl = process.env.IMAGE_EDITOR_API_URL
-    const tokenId = process.env.MODAL_PROXY_TOKEN_ID
-    const tokenSecret = process.env.MODAL_PROXY_TOKEN_SECRET
+    return callModal(
+      {
+        image_b64: data.imagesBase64,
+        prompt: data.prompt.trim(),
+        steps: data.steps,
+        seed: data.seed,
+      },
+      'edit',
+    )
+  })
 
-    if (!apiUrl || !tokenId || !tokenSecret) {
-      const missing = [
-        !apiUrl && 'IMAGE_EDITOR_API_URL',
-        !tokenId && 'MODAL_PROXY_TOKEN_ID',
-        !tokenSecret && 'MODAL_PROXY_TOKEN_SECRET',
-      ].filter(Boolean)
-      console.error(
-        'Image editor is missing configuration:',
-        missing.join(', '),
-      )
-      return failed('The editor is not available right now.')
+export const generateImage = createServerFn({ method: 'POST' })
+  .validator((data: GenerateInput) => data)
+  .handler(async ({ data }): Promise<EditOutput> => {
+    if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
+      return failed('Describe the image you want.')
+    }
+    if (data.prompt.length > 2000) {
+      return failed('That prompt is too long. Keep it under 2000 characters.')
+    }
+    if (!ASPECTS.includes(data.aspect)) {
+      return failed('Pick a shape for the image.')
+    }
+    if (!Number.isInteger(data.steps) || data.steps < 4 || data.steps > 20) {
+      return failed('Steps must be between 4 and 20.')
+    }
+    if (!Number.isFinite(data.seed)) {
+      return failed('Seed must be a number.')
     }
 
-    try {
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // Modal's proxy auth accepts the id.secret pair as a bearer token.
-          Authorization: `Bearer ${tokenId}.${tokenSecret}`,
-        },
-        body: JSON.stringify({
-          image_b64: data.imagesBase64,
-          prompt: data.prompt,
-          steps: data.steps,
-          seed: data.seed,
-        }),
-      })
-
-      const text = await response.text()
-
-      if (!response.ok) {
-        // 401 here means the proxy token is wrong, not that the model failed.
-        console.error(
-          'Image editor request failed:',
-          response.status,
-          text.slice(0, 300),
-        )
-        return failed('The edit did not finish. Try again in a moment.')
-      }
-
-      let body: {
-        ok?: boolean
-        error?: unknown
-        image_b64?: string
-        seconds?: number
-        steps?: number
-      }
-      try {
-        body = JSON.parse(text)
-      } catch (error) {
-        console.error('Image editor returned invalid JSON:', error)
-        return failed('The edit did not finish. Try again in a moment.')
-      }
-
-      if (!body.ok || !body.image_b64) {
-        const detail = modelMessage(body.error)
-        if (!detail && body.error)
-          console.error('Image editor model error:', body.error)
-        return failed(
-          detail || 'The edit did not finish. Try again in a moment.',
-        )
-      }
-
-      return {
-        ok: true,
-        imageBase64: body.image_b64,
-        seconds: body.seconds,
-        steps: body.steps,
-      }
-    } catch (error) {
-      console.error('Image editor request failed:', error)
-      return failed('Could not reach the editor. Try again in a moment.')
-    }
+    return callModal(
+      {
+        image_b64: [],
+        prompt: data.prompt.trim(),
+        steps: data.steps,
+        seed: data.seed,
+        aspect: data.aspect,
+      },
+      'generate',
+    )
   })

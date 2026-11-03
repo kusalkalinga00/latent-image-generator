@@ -60,6 +60,34 @@ MODEL_CACHE = "/models/hf"
 LORA_REPO = "lightx2v/Qwen-Image-Edit-2511-Lightning"
 LORA_FILE = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 
+# Text-to-image, for prompts with no photo attached. A different base model, so it
+# is a second class with its own container: the two checkpoints are ~54 GiB each
+# and cannot be co-resident on one 80 GB card.
+T2I_MODEL_ID = "Qwen/Qwen-Image-2512"
+T2I_LORA_REPO = "lightx2v/Qwen-Image-2512-Lightning"
+T2I_LORA_FILE = "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors"
+
+# 2512 ships a Chinese quality-negative in its own examples and the Lightning
+# reference keeps it for this checkpoint. It is a property of the model, not of the
+# user's prompt, so it travels with the pipeline instead of the request.
+T2I_NEGATIVE = (
+    "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，"
+    "人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。"
+)
+
+# The sizes Qwen and the Lightning reference use. Not arbitrary: they are the
+# buckets the model was trained at, and off-bucket sizes cost quality.
+ASPECTS: dict[str, tuple[int, int]] = {
+    "1:1": (1328, 1328),
+    "3:2": (1584, 1056),
+    "2:3": (1056, 1584),
+    "4:3": (1472, 1104),
+    "3:4": (1104, 1472),
+    "16:9": (1664, 928),
+    "9:16": (928, 1664),
+}
+DEFAULT_ASPECT = "1:1"
+
 # 2511 accepts multiple reference images; cap it so one call cannot balloon VRAM.
 MAX_IMAGES = 3
 MAX_STEPS = 60
@@ -168,6 +196,10 @@ def check_env() -> str:
         "has_qwen_image_edit_plus": bool(
             hasattr(diffusers, "QwenImageEditPlusPipeline")
         ),
+        # The text-to-image class. Pinned diffusers is 0.41.0; if this ever reads
+        # False the generate path cannot even be constructed.
+        "has_qwen_image_pipeline": bool(hasattr(diffusers, "QwenImagePipeline")),
+        "aspects": sorted(ASPECTS),
     }
 
     # subfolder="processor" is required. This repo keeps every component in its own
@@ -221,9 +253,8 @@ def check_env() -> str:
     return json.dumps(info)
 
 
-@app.function(image=gpu_image, volumes={"/models": weights}, timeout=5400, cpu=4)
-def download_weights() -> str:
-    """Pull the checkpoint and the LoRA into the Volume, once. Commits, so it persists."""
+def _download(model_id: str, lora_repo: str, lora_file: str) -> dict[str, Any]:
+    """Fetch a checkpoint plus its LoRA into the Volume and report what landed."""
     import json
     import os
     import time
@@ -231,8 +262,8 @@ def download_weights() -> str:
     from huggingface_hub import hf_hub_download, snapshot_download
 
     started = time.time()
-    path = snapshot_download(MODEL_ID, max_workers=8)
-    lora_path = hf_hub_download(repo_id=LORA_REPO, filename=LORA_FILE)
+    path = snapshot_download(model_id, max_workers=8)
+    lora_path = hf_hub_download(repo_id=lora_repo, filename=lora_file)
 
     total = 0
     for root, _dirs, names in os.walk(MODEL_CACHE):
@@ -249,6 +280,7 @@ def download_weights() -> str:
     weights.commit()
 
     info = {
+        "model": model_id,
         "model_path": path,
         "lora_path": lora_path,
         "bytes": total,
@@ -256,7 +288,23 @@ def download_weights() -> str:
         "seconds": round(time.time() - started, 1),
     }
     print("[image-editor] downloaded: " + json.dumps(info))
-    return json.dumps(info)
+    return info
+
+
+@app.function(image=gpu_image, volumes={"/models": weights}, timeout=5400, cpu=4)
+def download_weights() -> str:
+    """The edit checkpoint (~54 GiB) and its LoRA. Storage is free under 1 TiB."""
+    import json
+
+    return json.dumps(_download(MODEL_ID, LORA_REPO, LORA_FILE))
+
+
+@app.function(image=gpu_image, volumes={"/models": weights}, timeout=5400, cpu=4)
+def download_t2i() -> str:
+    """The text-to-image checkpoint (~57 GiB) and its 4-step LoRA."""
+    import json
+
+    return json.dumps(_download(T2I_MODEL_ID, T2I_LORA_REPO, T2I_LORA_FILE))
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=900, cpu=2)
@@ -396,9 +444,116 @@ class Editor:
         }
 
 
+@app.cls(
+    image=gpu_image,
+    gpu="H100",
+    volumes={"/models": weights},
+    timeout=1200,
+    scaledown_window=60,
+    max_containers=1,
+)
+class Painter:
+    """Text-to-image, for a prompt with no photo attached.
+
+    A separate class, not a branch inside Editor: both checkpoints are ~54 GiB, so
+    they cannot share an 80 GB card. Two classes means two cold starts but each
+    container only ever holds the model it is working with.
+    """
+
+    @modal.enter()
+    def load(self) -> None:
+        import time
+
+        import torch
+        from diffusers import FlowMatchEulerDiscreteScheduler, QwenImagePipeline
+        from diffusers.models import QwenImageTransformer2DModel
+        from huggingface_hub import hf_hub_download
+
+        started = time.time()
+
+        # Same order as the editor: build the transformer, hand the pipeline the
+        # distillation scheduler, attach the LoRA last. Both LoRAs were distilled
+        # with shift=3, which is what LIGHTNING_SCHEDULER_CONFIG encodes.
+        transformer = QwenImageTransformer2DModel.from_pretrained(
+            T2I_MODEL_ID, subfolder="transformer", torch_dtype=torch.bfloat16
+        )
+        scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            LIGHTNING_SCHEDULER_CONFIG
+        )
+        self.pipe = QwenImagePipeline.from_pretrained(
+            T2I_MODEL_ID,
+            transformer=transformer,
+            scheduler=scheduler,
+            torch_dtype=torch.bfloat16,
+        )
+        lora_path = hf_hub_download(repo_id=T2I_LORA_REPO, filename=T2I_LORA_FILE)
+        self.pipe.load_lora_weights(lora_path)
+        self.pipe.to("cuda")
+        self.pipe.set_progress_bar_config(disable=True)
+
+        print(
+            f"[image-editor] painter + 4-step LoRA on GPU in "
+            f"{time.time() - started:.1f}s"
+        )
+
+    @modal.method()
+    def generate(
+        self,
+        prompt: str,
+        aspect: str = DEFAULT_ASPECT,
+        steps: int = DEFAULT_STEPS,
+        cfg: float = DEFAULT_CFG,
+        seed: int = 0,
+    ) -> dict[str, Any]:
+        """Generate an image from a prompt alone."""
+        import time
+
+        import torch
+
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
+
+        steps = max(1, min(int(steps), MAX_STEPS))
+        width, height = ASPECTS.get(aspect, ASPECTS[DEFAULT_ASPECT])
+
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": T2I_NEGATIVE,
+            "width": width,
+            "height": height,
+            "generator": torch.Generator(device="cuda").manual_seed(int(seed)),
+            "true_cfg_scale": float(cfg),
+            "num_inference_steps": steps,
+        }
+        # Same rule as the editor: the distilled path takes no guidance, the slower
+        # one does.
+        if steps > LIGHTNING_STEPS:
+            kwargs["guidance_scale"] = 1.0
+
+        started = time.time()
+        with torch.inference_mode():
+            result = self.pipe(**kwargs)
+        elapsed = time.time() - started
+
+        buf = io.BytesIO()
+        result.images[0].save(buf, format="PNG")
+        return {
+            "png": buf.getvalue(),
+            "seconds": round(elapsed, 2),
+            "steps": steps,
+            "cfg": float(cfg),
+            "size": list(result.images[0].size),
+            "aspect": aspect,
+        }
+
+
 def _editor() -> Any:
     """Resolve the deployed GPU class, from a web container or a local entrypoint."""
     return modal.Cls.from_name(APP_NAME, "Editor")
+
+
+def _painter() -> Any:
+    return modal.Cls.from_name(APP_NAME, "Painter")
 
 
 def _run_edit(
@@ -407,6 +562,18 @@ def _run_edit(
     """The one place that calls the GPU, shared by the API and the smoke test."""
     return _editor()().edit.remote(
         images=images, prompt=prompt, steps=int(steps), cfg=float(cfg), seed=int(seed)
+    )
+
+
+def _run_generate(
+    prompt: str, aspect: str, steps: int, cfg: float, seed: int
+) -> dict[str, Any]:
+    return _painter()().generate.remote(
+        prompt=prompt,
+        aspect=aspect,
+        steps=int(steps),
+        cfg=float(cfg),
+        seed=int(seed),
     )
 
 
@@ -493,8 +660,12 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     CORS to configure and no client-side secret to leak.
 
         POST <url>
-        Authorization: Bearer <MODAL_TOKEN_ID>.<MODAL_TOKEN_SECRET>
-        {"image_b64": "...", "prompt": "...", "steps": 4, "seed": 0}
+        Authorization: Bearer <MODAL...RET>
+        {"image_b64": ["..."], "prompt": "...", "steps": 4, "seed": 0}
+
+    One endpoint, two jobs, decided by whether a photo came with the prompt: no
+    image means generate, an image means edit. That keeps the web app from having
+    to know which endpoint to call, and keeps the mode in one place.
 
     Images travel base64-encoded in both directions.
     """
@@ -507,24 +678,26 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     raw = payload.get("image_b64") or []
     if isinstance(raw, str):
         raw = [raw]
-    if not raw:
-        return {"ok": False, "error": "image_b64 is required"}
+    raw = [item for item in raw if item]
     if len(raw) > MAX_IMAGES:
         return {"ok": False, "error": f"at most {MAX_IMAGES} images"}
 
-    try:
-        decoded = [base64.b64decode(item) for item in raw]
-    except Exception as exc:
-        return {"ok": False, "error": f"image_b64 is not valid base64: {exc}"}
+    steps = payload.get("steps", DEFAULT_STEPS)
+    cfg = payload.get("cfg", DEFAULT_CFG)
+    seed = payload.get("seed", 0)
 
     try:
-        out = _run_edit(
-            decoded,
-            prompt,
-            payload.get("steps", DEFAULT_STEPS),
-            payload.get("cfg", DEFAULT_CFG),
-            payload.get("seed", 0),
-        )
+        if raw:
+            try:
+                decoded = [base64.b64decode(item) for item in raw]
+            except Exception as exc:
+                return {"ok": False, "error": f"image_b64 is not valid base64: {exc}"}
+            out = _run_edit(decoded, prompt, steps, cfg, seed)
+            mode = "edit"
+        else:
+            aspect = str(payload.get("aspect") or DEFAULT_ASPECT)
+            out = _run_generate(prompt, aspect, steps, cfg, seed)
+            mode = "generate"
     except Exception as exc:
         # Surface model failures as JSON rather than an opaque 500, so the web app
         # can show the user what actually went wrong.
@@ -532,6 +705,7 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "ok": True,
+        "mode": mode,
         "image_b64": base64.b64encode(out["png"]).decode("ascii"),
         "seconds": out["seconds"],
         "steps": out["steps"],
