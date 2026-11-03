@@ -32,11 +32,11 @@
   --panel: #ffffff;
   --panel-2: #f7f8fa;
   --panel-3: #eef0f3;
-  --line: rgba(15, 23, 42, 0.1);
-  --line-strong: rgba(15, 23, 42, 0.18);
+  --line: rgba(15, 23, 42, 0.13);
+  --line-strong: rgba(15, 23, 42, 0.24);
   --ink: #10131a;
-  --ink-2: #4b5563;
-  --ink-3: #626b78;
+  --ink-2: #434c58;
+  --ink-3: #5b6472;
   --shadow-lg:
     0 30px 70px -30px rgba(15, 23, 42, 0.45), 0 1px 0 rgba(15, 23, 42, 0.05);
   --shadow-sm:
@@ -141,7 +141,7 @@ button {
   gap: 16px;
   height: 56px;
   padding: 0 18px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-strong);
 }
 
 .brand {
@@ -850,7 +850,7 @@ button {
   flex: 0 0 auto;
   height: 26px;
   padding: 0 10px;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in oklab, var(--ink) 17%, transparent);
   border-radius: 999px;
   background: transparent;
   color: var(--ink-2);
