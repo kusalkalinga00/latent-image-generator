@@ -1,7 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CreditView } from '#/lib/credit'
-import { getCredit } from '#/lib/credit'
+import { refreshCredit } from '#/lib/credit-store'
 import { editImage } from '#/lib/edit'
 import { pushToast } from '#/lib/toast'
 
@@ -10,6 +9,11 @@ export const Route = createFileRoute('/')({ component: App })
 const MAX_IMAGES = 3
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 const MAX_EDGE = 1536 // the model works around 1MP; larger just costs GPU seconds
+
+// The backend holds one model: 2511 with the 4-step Lightning LoRA attached. There
+// is no second "standard" path to switch to, so steps are not a choice the UI can
+// offer - passing 4 is the honest thing to send.
+const STEPS = 4
 
 const WAIT_STEPS = ['Starting a GPU', 'Loading the model', 'Editing'] as const
 
@@ -28,17 +32,17 @@ function waitProgress(elapsed: number, warmed: boolean) {
 
 function waitDetail(step: number, warmed: boolean) {
   if (warmed || step === 2) return 'The GPU is working on your image.'
-  if (step === 1) {
-    return 'The model is loading. About 30 seconds is normal the first time.'
-  }
-  return 'A GPU is starting. The first edit takes longer than the ones after it.'
+  if (step === 1) return 'About 30 seconds is normal the first time.'
+  return 'A GPU is starting. The first edit is the slow one.'
 }
 
+// Short enough to scan as chips; the point is to show the range of edits, not to
+// write the prompt for the user.
 const EXAMPLES = [
-  'Make it night time with warm street lights',
-  'Put them in a cozy cafe, keep their faces the same',
-  'Change the text on the sign to read "GRAND OPENING"',
-  'Make it look like a watercolour painting',
+  'Night with warm street lights',
+  'Watercolour painting',
+  'Cosy cafe, same faces',
+  'Change the sign text',
 ]
 
 interface Attachment {
@@ -79,8 +83,6 @@ async function prepareImage(file: File): Promise<Attachment> {
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not process that image in this browser')
   ctx.drawImage(bitmap, 0, 0, width, height)
-  // createImageBitmap always returns an object with close(); the optional chain
-  // here was flagged as unnecessary and it was.
   bitmap.close()
 
   const dataUrl = canvas.toDataURL('image/png')
@@ -95,118 +97,115 @@ async function prepareImage(file: File): Promise<Attachment> {
   }
 }
 
-function money(amount: number) {
-  return amount.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  })
-}
-
-function CreditCard({ credit }: { credit: CreditView }) {
-  const allowance = credit.allowanceUsd ?? 30
-  const remaining = Math.max(0, credit.remainingUsd ?? 0)
-  const used = Math.max(0, allowance - remaining)
-  const usedPct = allowance > 0 ? Math.min(100, (used / allowance) * 100) : 0
-  const cold = (credit.coldEdits ?? 0).toLocaleString('en-US')
-  const warm = (credit.warmEdits ?? 0).toLocaleString('en-US')
-
-  return (
-    <section className="credit-card rise" aria-label="Monthly credit">
-      <div className="credit-head">
-        <p className="step-label">Monthly credit</p>
-        <p className="credit-left">{money(remaining)} left</p>
-      </div>
-      <div
-        className="credit-meter"
-        role="meter"
-        aria-valuemin={0}
-        aria-valuemax={Math.round(allowance * 100)}
-        aria-valuenow={Math.round(used * 100)}
-        aria-label={`${money(used)} of ${money(allowance)} used`}
-      >
-        <span style={{ width: `${usedPct}%` }} />
-      </div>
-      <p className="credit-scale">
-        <span>{money(used)} used</span>
-        <span>{money(allowance)}</span>
-      </p>
-      <div className="credit-badges">
-        <p className="credit-badge">
-          <span>Cold start</span>
-          <strong>{cold}</strong>
-          <span>edits</span>
-        </p>
-        <p className="credit-badge">
-          <span>GPU warm</span>
-          <strong>{warm}</strong>
-          <span>edits</span>
-        </p>
-      </div>
-    </section>
-  )
-}
-
+/**
+ * Wipe between the edit and the original, dragged across the image.
+ *
+ * The whole image is a range input, so it drags with the mouse, taps, and moves
+ * with the arrow keys - no pointer-event maths and no inaccessible custom slider.
+ */
 function Compare({ before, after }: { before: string; after: string }) {
-  const [pos, setPos] = useState(56)
+  const [pos, setPos] = useState(54)
 
   return (
     <div className="compare">
-      <img src={after} alt="Edited result" className="result-img" />
+      <img src={after} alt="Edited result" />
       <img
         src={before}
         alt=""
         aria-hidden="true"
-        className="compare-before result-img"
+        className="compare-overlay"
         style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
       />
+      <span className="compare-line" style={{ left: `${pos}%` }} />
+      <span className="compare-grip" style={{ left: `${pos}%` }}>
+        <svg
+          viewBox="0 0 6 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+        >
+          <path d="M5 1L1 5l4 4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <svg
+          viewBox="0 0 6 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+        >
+          <path d="M1 1l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </span>
       <span className="stage-tag">Before</span>
-      <span className="stage-tag stage-tag-end">After</span>
-      <span
-        className="compare-handle"
-        style={{ left: `${pos}%` }}
-        aria-hidden="true"
-      />
+      <span className="stage-tag end">After</span>
       <input
         className="compare-range"
         type="range"
         min={0}
         max={100}
         value={pos}
-        aria-label="Compare the original and the edit"
+        aria-label="Compare the original with the edit"
         onChange={(event) => setPos(Number(event.target.value))}
       />
     </div>
   )
 }
 
-function CreditSkeleton() {
+function Developing({
+  elapsed,
+  warmed,
+  onStop,
+}: {
+  elapsed: number
+  warmed: boolean
+  onStop: () => void
+}) {
+  const phase = waitStep(elapsed, warmed)
+  const progress = Math.round(waitProgress(elapsed, warmed))
+
   return (
-    <section
-      className="credit-card"
-      aria-busy="true"
-      aria-label="Loading monthly credit"
-    >
-      <div className="credit-head">
-        <span className="skeleton skeleton-label" />
-        <span className="skeleton skeleton-amount" />
+    <div className="developing">
+      <div className="develop-panel">
+        <p className="develop-elapsed">
+          {elapsed.toFixed(0)}s<span>elapsed</span>
+        </p>
+        <ol className="develop-phases">
+          {WAIT_STEPS.map((label, index) => (
+            <li
+              key={label}
+              className={
+                index === phase
+                  ? 'is-current'
+                  : index < phase
+                    ? 'is-done'
+                    : undefined
+              }
+            >
+              {label}
+            </li>
+          ))}
+        </ol>
+        <div
+          className="develop-meter"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+          aria-label={WAIT_STEPS[phase]}
+        >
+          <i style={{ width: `${progress}%` }} />
+        </div>
+        <p className="develop-note">{waitDetail(phase, warmed)}</p>
+        <button type="button" onClick={onStop} className="develop-cancel">
+          Stop waiting
+        </button>
       </div>
-      <span className="skeleton skeleton-meter" />
-      <div className="credit-scale">
-        <span className="skeleton skeleton-caption" />
-        <span className="skeleton skeleton-caption" />
-      </div>
-      <div className="credit-badges">
-        <span className="skeleton skeleton-badge" />
-        <span className="skeleton skeleton-badge" />
-      </div>
-    </section>
+    </div>
   )
 }
 
 function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [prompt, setPrompt] = useState('')
-  const [steps, setSteps] = useState(4)
   const [seed, setSeed] = useState(0)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
@@ -215,33 +214,22 @@ function App() {
   )
   const [resultUrl, setResultUrl] = useState('')
   const [resultMeta, setResultMeta] = useState('')
+  const [errorText, setErrorText] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
-  const [credit, setCredit] = useState<CreditView | null>(null)
+  const [shortcut, setShortcut] = useState('Ctrl')
 
   const inputRef = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   const runRef = useRef<() => void>(() => {})
   const statusRef = useRef(status)
-  const resultRef = useRef<HTMLElement>(null)
   const runId = useRef(0)
   const warmed = useRef(false)
   statusRef.current = status
-  const [shortcut, setShortcut] = useState('Ctrl+Enter')
 
   // The first run of a session loads 53.76 GiB into VRAM, which takes about 30s
   // before a single denoising step happens. A bare spinner for that reads as
   // broken, so elapsed time stays on screen and the copy says what is happening.
-  useEffect(() => {
-    let cancelled = false
-    void getCredit().then((next) => {
-      if (!cancelled) setCredit(next)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
   useEffect(() => {
     if (status !== 'running') return
     setElapsed(0)
@@ -252,8 +240,16 @@ function App() {
 
   useEffect(() => {
     const apple = /Mac|iPhone|iPad/.test(navigator.platform)
-    if (apple) setShortcut('⌘ Enter')
+    if (apple) setShortcut('⌘')
   }, [])
+
+  // Grow the prompt with its content, up to the cap in CSS.
+  useEffect(() => {
+    const el = promptRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(140, el.scrollHeight)}px`
+  }, [prompt])
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -273,14 +269,13 @@ function App() {
       if (room <= 0) {
         pushToast(
           'error',
-          `You can add up to ${MAX_IMAGES} images. Remove one first.`,
+          `You can add up to ${MAX_IMAGES} images. Remove one.`,
         )
         return
       }
 
-      const accepted = incoming.slice(0, room)
       const prepared: Attachment[] = []
-      for (const file of accepted) {
+      for (const file of incoming.slice(0, room)) {
         try {
           prepared.push(await prepareImage(file))
         } catch (err) {
@@ -292,12 +287,16 @@ function App() {
 
       if (prepared.length > 0) {
         setAttachments((prev) => [...prev, ...prepared].slice(0, MAX_IMAGES))
+        // A new input invalidates whatever is on the stage.
+        setResultUrl('')
+        setResultMeta('')
+        setErrorText('')
+        setStatus('idle')
       }
       if (incoming.length > room) {
-        const noun = room === 1 ? 'image fits' : 'images fit'
         pushToast(
           'info',
-          `Only ${room} more ${noun}. The limit is ${MAX_IMAGES}.`,
+          `Only ${room} more ${room === 1 ? 'image fits' : 'images fit'}. The limit is ${MAX_IMAGES}.`,
         )
       }
     },
@@ -343,8 +342,12 @@ function App() {
     }
   }
 
-  const removeAttachment = (id: string) =>
+  const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id))
+    setResultUrl('')
+    setResultMeta('')
+    setStatus('idle')
+  }
 
   const run = async () => {
     if (attachments.length === 0) {
@@ -359,15 +362,15 @@ function App() {
 
     const id = ++runId.current
     setElapsed(0)
+    setErrorText('')
     setStatus('running')
-    resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 
     try {
       const out = await editImage({
         data: {
           imagesBase64: attachments.map((a) => a.base64),
           prompt: prompt.trim(),
-          steps,
+          steps: STEPS,
           seed,
         },
       })
@@ -375,7 +378,10 @@ function App() {
       if (runId.current !== id) return
 
       if (!out.ok || !out.imageBase64) {
-        pushToast('error', out.error ?? 'The edit did not finish. Try again.')
+        const message =
+          out.error ?? 'The edit did not finish. Try again in a moment.'
+        pushToast('error', message)
+        setErrorText(message)
         setStatus('error')
         return
       }
@@ -388,6 +394,9 @@ function App() {
         'success',
         out.seconds ? `Edit ready in ${out.seconds}s.` : 'Edit ready.',
       )
+      // The credit chip is the only place remaining budget is shown, and this is
+      // the only moment it moves.
+      void refreshCredit()
     } catch (err) {
       if (runId.current !== id) return
       const message =
@@ -396,14 +405,18 @@ function App() {
         ? 'Could not reach the editor. Try again in a moment.'
         : message
       pushToast('error', friendly)
+      setErrorText(friendly)
       setStatus('error')
     }
   }
 
-  const cancelEdit = () => {
+  // Modal cannot cancel work it has already started: this stops the wait and
+  // leaves the GPU to finish and bill. The copy says so rather than promising a
+  // cancellation that does not happen.
+  const stopWaiting = () => {
     runId.current += 1
     setStatus(resultUrl ? 'done' : 'idle')
-    pushToast('info', 'Edit cancelled.')
+    pushToast('info', 'Stopped waiting. The GPU may still finish this one.')
   }
 
   const clearEditor = () => {
@@ -411,6 +424,7 @@ function App() {
     setPrompt('')
     setResultUrl('')
     setResultMeta('')
+    setErrorText('')
     setStatus('idle')
   }
 
@@ -422,10 +436,11 @@ function App() {
         new File([blob], 'edited.png', { type: 'image/png' }),
       )
       setAttachments([next])
+      setPrompt('')
       setResultUrl('')
       setResultMeta('')
       setStatus('idle')
-      pushToast('info', 'This result is now the image to edit.')
+      pushToast('info', 'The result is now the image in the bar below.')
       promptRef.current?.focus()
     } catch (err) {
       const message =
@@ -448,92 +463,137 @@ function App() {
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
-  const phase = waitStep(elapsed, warmed.current)
-  const progress = Math.round(waitProgress(elapsed, warmed.current))
+  const running = status === 'running'
+  const full = attachments.length >= MAX_IMAGES
   const editReason =
     attachments.length === 0
       ? 'Add an image'
       : !prompt.trim()
         ? 'Describe the change'
         : null
-  const full = attachments.length >= MAX_IMAGES
-  const statusLabel =
-    status === 'running'
-      ? `${WAIT_STEPS[phase]} · ${elapsed.toFixed(0)}s`
-      : status === 'done'
-        ? 'Ready'
-        : status === 'error'
-          ? 'Needs attention'
-          : preview
-            ? 'Ready to edit'
-            : 'Idle'
 
   return (
-    <main className="studio-page">
-      <div className="studio">
-        {credit === null ? (
-          <CreditSkeleton />
+    <>
+      <main
+        className={`stage${dragging ? ' is-hot' : ''}`}
+        onDragOver={(e) => {
+          e.preventDefault()
+          setDragging(true)
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault()
+          setDragging(false)
+          void addFiles(e.dataTransfer.files)
+        }}
+      >
+        {preview ? (
+          <figure className="frame">
+            {running ? (
+              <>
+                <img src={preview} alt="Your image" />
+                <Developing
+                  elapsed={elapsed}
+                  warmed={warmed.current}
+                  onStop={stopWaiting}
+                />
+              </>
+            ) : status === 'done' && resultUrl ? (
+              <Compare before={preview} after={resultUrl} />
+            ) : (
+              <>
+                <img src={preview} alt={attachments[0]?.name ?? 'Your image'} />
+                <span className="stage-tag">Original</span>
+              </>
+            )}
+          </figure>
         ) : (
-          credit.ok && <CreditCard credit={credit} />
+          <section className="empty">
+            <svg
+              className="empty-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              aria-hidden="true"
+            >
+              <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+              <circle
+                cx="8.6"
+                cy="10"
+                r="1.5"
+                fill="currentColor"
+                stroke="none"
+              />
+              <path d="M21 16.5l-5.4-5.2L7 19.5" strokeLinecap="round" />
+            </svg>
+            <h1>Drop a photo to start</h1>
+            <p>
+              Drag one here, paste one, or choose a file. Nothing is stored, and
+              nothing runs until you press edit.
+            </p>
+            <div className="row">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => inputRef.current?.click()}
+              >
+                Choose an image
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void useSample()}
+              >
+                Try the sample
+              </button>
+            </div>
+          </section>
         )}
+      </main>
 
-        <div className="work-grid">
-          {/* ---------------- 1 + 2 · input ---------------- */}
-          <section
-            className="card rise"
-            onDragOver={(e) => {
-              e.preventDefault()
-              setDragging(true)
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault()
-              setDragging(false)
-              void addFiles(e.dataTransfer.files)
-            }}
-          >
-            <h2 className="step-label">
-              1 · Your image
-              {attachments.length
-                ? ` (${attachments.length}/${MAX_IMAGES})`
-                : ''}
-            </h2>
-
+      {status === 'done' && resultUrl && (
+        <div className="stage-bar">
+          <span>
+            <span className="meta-time">{resultMeta} · </span>
+            <button type="button" onClick={clearEditor} className="link-btn">
+              Start over
+            </button>
+          </span>
+          <span className="acts">
             <button
               type="button"
-              onClick={() => inputRef.current?.click()}
-              disabled={full}
-              className={`dropzone${dragging ? ' is-hot' : ''}`}
+              className="btn btn-ghost"
+              onClick={() => void continueFromResult()}
             >
-              <svg
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-                className="h-6 w-6 text-[var(--ink-soft)]"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.6"
-              >
-                <rect x="3" y="5" width="18" height="14" rx="2" />
-                <circle
-                  cx="8.5"
-                  cy="10"
-                  r="1.5"
-                  fill="currentColor"
-                  stroke="none"
-                />
-                <path d="M21 16l-5.5-5.5L7 19" />
-              </svg>
-              <span className="text-sm font-medium text-[var(--ink)]">
-                {full
-                  ? `That is all ${MAX_IMAGES} images`
-                  : 'Drop images here or click to choose'}
-              </span>
-              <span className="max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-                Up to {MAX_IMAGES}. Add more than one to combine or compare
-                subjects.
-              </span>
+              Edit this result
             </button>
+            <button type="button" className="btn" onClick={download}>
+              Download PNG
+            </button>
+          </span>
+        </div>
+      )}
 
+      {status === 'error' && errorText && (
+        <div className="notice is-error" role="alert">
+          <span className="dot" aria-hidden="true" />
+          <span className="grow">{errorText}</span>
+          <button type="button" onClick={() => void run()} className="btn">
+            Try again
+          </button>
+        </div>
+      )}
+
+      {attachments.length > 0 && (
+        <div className="composer-wrap">
+          <form
+            className={`composer${running ? ' is-busy' : ''}`}
+            onSubmit={(event) => {
+              event.preventDefault()
+              void run()
+            }}
+          >
             {attachments.length > 0 && (
               <ul className="thumbs">
                 {attachments.map((a) => (
@@ -549,257 +609,125 @@ function App() {
                     </button>
                   </li>
                 ))}
+                {!full && (
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => inputRef.current?.click()}
+                      className="thumb thumb-add"
+                      aria-label="Add another image"
+                    >
+                      +
+                    </button>
+                  </li>
+                )}
+                <li className="thumbs-end">
+                  {showAdvanced ? (
+                    <label className="seed">
+                      <span>Seed</span>
+                      <input
+                        type="number"
+                        value={seed}
+                        onChange={(e) => setSeed(Number(e.target.value))}
+                        aria-label="Seed"
+                      />
+                    </label>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvanced(true)}
+                      className="chip"
+                      title="Same seed and same input gives the same result"
+                    >
+                      Seed
+                    </button>
+                  )}
+                </li>
               </ul>
             )}
 
-            <div className="step-row">
-              <h2 className="step-label">2 · What should change?</h2>
-              {(prompt.length > 0 ||
-                resultUrl.length > 0 ||
-                status === 'running' ||
-                status === 'error') && (
-                <button
-                  type="button"
-                  onClick={clearEditor}
-                  className="inline-flex min-h-11 items-center text-xs font-medium text-[var(--ink-soft)] underline-offset-2 hover:text-[var(--ink)] hover:underline"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-            <textarea
-              ref={promptRef}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={4}
-              placeholder="Make the sky a dramatic sunset and keep the subject unchanged"
-              className="field"
-            />
-
-            <div className="examples">
-              {EXAMPLES.map((example) => (
-                <button
-                  key={example}
-                  type="button"
-                  onClick={() => setPrompt(example)}
-                  className="chip"
-                >
-                  {example}
-                </button>
-              ))}
-            </div>
-
-            <div>
-              <button
-                type="button"
-                onClick={() => setShowAdvanced((v) => !v)}
-                className="inline-flex min-h-11 items-center text-xs font-medium text-[var(--ink-soft)] underline-offset-2 hover:text-[var(--ink)] hover:underline"
-                aria-expanded={showAdvanced}
-              >
-                {showAdvanced ? 'Hide advanced' : 'Show advanced'}
-              </button>
-
-              {showAdvanced && (
-                <div className="advanced mt-2">
-                  <label className="text-xs font-medium text-[var(--ink-soft)]">
-                    Steps: {steps}
-                    <input
-                      type="range"
-                      min={4}
-                      max={20}
-                      step={1}
-                      value={steps}
-                      onChange={(e) => setSteps(Number(e.target.value))}
-                      className="mt-2 w-full"
-                    />
-                    <span className="mt-1 block font-normal leading-5">
-                      4 is the distilled default. Above 4 uses the slower
-                      standard path.
-                    </span>
-                  </label>
-                  <label className="text-xs font-medium text-[var(--ink-soft)]">
-                    Seed
-                    <input
-                      type="number"
-                      value={seed}
-                      onChange={(e) => setSeed(Number(e.target.value))}
-                      className="field mt-2 h-10"
-                    />
-                    <span className="mt-1 block font-normal leading-5">
-                      Same seed and input gives the same result.
-                    </span>
-                  </label>
-                </div>
-              )}
-            </div>
-
-            <div className="card-foot">
-              <button
-                type="button"
-                onClick={() => void run()}
-                disabled={status === 'running' || editReason !== null}
-                className="btn-primary"
-              >
-                <span>
-                  {status === 'running'
-                    ? `Editing… ${elapsed.toFixed(1)}s`
-                    : (editReason ?? 'Edit image')}
+            <div className="field-wrap">
+              <textarea
+                ref={promptRef}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={1}
+                placeholder="Describe the change…"
+                className="field"
+                aria-label="Describe the change"
+                readOnly={running}
+              />
+              {!running && (
+                <span className="field-hint" aria-hidden="true">
+                  <kbd>{shortcut}</kbd>
+                  <kbd>↵</kbd>
                 </span>
-                {status !== 'running' && !editReason && (
-                  <span className="arrow" aria-hidden="true">
-                    →
-                  </span>
-                )}
-              </button>
-              {!editReason && status !== 'running' && (
-                <p className="shortcut-hint">{shortcut} to edit</p>
-              )}
-            </div>
-          </section>
-
-          {/* ---------------- 3 · result ---------------- */}
-          <section ref={resultRef} className="card rise rise-late">
-            <div className="step-row">
-              <h2 className="step-label">3 · Result</h2>
-              <span
-                className={`status-pill${status === 'running' ? ' is-busy' : ''}`}
-              >
-                <span className="dot" aria-hidden="true" />
-                {statusLabel}
-              </span>
-            </div>
-
-            <div
-              className={`result-stage${(status === 'done' && resultUrl) || (status === 'idle' && preview) ? ' has-image' : ''}`}
-            >
-              {status === 'running' ? (
-                <div className="developing">
-                  {preview && (
-                    <img
-                      src={preview}
-                      alt=""
-                      aria-hidden="true"
-                      className="develop-ghost"
-                    />
-                  )}
-                  <div className="develop-inner">
-                    <ol className="wait-steps">
-                      {WAIT_STEPS.map((label, index) => (
-                        <li
-                          key={label}
-                          className={
-                            index === phase
-                              ? 'is-current'
-                              : index < phase
-                                ? 'is-done'
-                                : undefined
-                          }
-                        >
-                          {label}
-                        </li>
-                      ))}
-                    </ol>
-                    <p className="m-0 text-sm font-medium text-[var(--ink)]">
-                      {WAIT_STEPS[phase]} — {elapsed.toFixed(0)}s
-                    </p>
-                    <div
-                      className="develop-meter"
-                      role="progressbar"
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={progress}
-                      aria-label={WAIT_STEPS[phase]}
-                    >
-                      <i
-                        className="is-fill"
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                    <p className="m-0 max-w-xs text-xs leading-5 text-[var(--ink-soft)]">
-                      {waitDetail(phase, warmed.current)}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={cancelEdit}
-                      className="btn-quiet h-10 px-4 text-xs font-medium"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : status === 'done' && resultUrl ? (
-                preview ? (
-                  <Compare before={preview} after={resultUrl} />
-                ) : (
-                  <img
-                    src={resultUrl}
-                    alt="Edited result"
-                    className="result-img"
-                  />
-                )
-              ) : status === 'error' ? (
-                <>
-                  <span className="text-xl" aria-hidden="true">
-                    ⚠️
-                  </span>
-                  <p className="m-0 max-w-xs text-sm leading-6 text-[var(--ink-soft)]">
-                    The edit did not finish. Adjust the prompt and try again.
-                  </p>
-                </>
-              ) : preview ? (
-                <div className="preview-frame">
-                  <img
-                    src={preview}
-                    alt={attachments[0]?.name ?? 'Selected image'}
-                    className="result-img"
-                  />
-                  <span className="stage-tag">Original</span>
-                </div>
-              ) : (
-                <>
-                  <span className="text-xl" aria-hidden="true">
-                    ✨
-                  </span>
-                  <p className="m-0 max-w-xs text-sm leading-6 text-[var(--ink-soft)]">
-                    Your edited image will appear here.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => void useSample()}
-                    className="btn-quiet h-10 px-4 text-xs font-medium"
-                  >
-                    Try a sample
-                  </button>
-                </>
               )}
             </div>
 
-            {status === 'done' && resultUrl && (
-              <div className="result-bar">
-                <p className="m-0 text-xs text-[var(--ink-soft)]">
-                  {resultMeta}
-                </p>
-                <div className="result-actions">
+            <div className="composer-foot">
+              <div className="chips">
+                {EXAMPLES.map((example) => (
                   <button
+                    key={example}
                     type="button"
-                    onClick={() => void continueFromResult()}
-                    className="btn-quiet h-10 px-4 text-xs font-medium"
+                    onClick={() => {
+                      setPrompt(example)
+                      promptRef.current?.focus()
+                    }}
+                    className={`chip${prompt.trim() === example ? ' is-active' : ''}`}
                   >
-                    Edit this result
+                    {example}
                   </button>
-                  <button
-                    type="button"
-                    onClick={download}
-                    className="btn-quiet h-10 px-4 text-xs font-medium"
-                  >
-                    Download PNG
-                  </button>
-                </div>
+                ))}
               </div>
-            )}
-          </section>
+
+              <div className="composer-actions">
+                {running ? (
+                  <button
+                    type="button"
+                    className="btn-primary is-stop"
+                    onClick={stopWaiting}
+                    title="This stops the wait. Modal cannot cancel a call already running, so the GPU may still finish and bill."
+                  >
+                    Stop waiting
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      aria-hidden="true"
+                    >
+                      <rect x="7" y="7" width="10" height="10" rx="1.6" />
+                    </svg>
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    className="btn-primary"
+                    disabled={editReason !== null}
+                  >
+                    Edit
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M5 12h13M12 5l7 7-7 7"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
+          </form>
         </div>
-      </div>
+      )}
 
       <input
         ref={inputRef}
@@ -812,6 +740,6 @@ function App() {
           e.target.value = ''
         }}
       />
-    </main>
+    </>
   )
 }

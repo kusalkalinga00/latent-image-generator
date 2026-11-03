@@ -3,7 +3,6 @@ import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
 import { useEffect } from 'react'
-import Footer from '../components/Footer'
 import Header from '../components/Header'
 import Toaster from '../components/Toaster'
 import { pushToast } from '../lib/toast'
@@ -20,22 +19,31 @@ function RootError({ error, reset }: ErrorComponentProps) {
   }, [error])
 
   return (
-    <main className="studio-page">
-      <section
-        className="card"
-        style={{ marginTop: '2rem', maxWidth: '28rem' }}
-      >
-        <h1 className="m-0 text-lg font-medium">Something went wrong</h1>
-        <p className="m-0 text-sm leading-6 text-[var(--ink-soft)]">
-          The page hit an unexpected error. You can try again.
-        </p>
-        <button
-          type="button"
-          onClick={() => reset()}
-          className="btn-quiet h-10 px-4 text-sm font-medium"
-        >
-          Try again
-        </button>
+    <main className="stage">
+      <section className="empty">
+        <h1>Something went wrong</h1>
+        <p>The page hit an unexpected error. You can try again.</p>
+        <div className="row">
+          <button type="button" onClick={() => reset()} className="btn">
+            Try again
+          </button>
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function NotFound() {
+  return (
+    <main className="stage">
+      <section className="empty">
+        <h1>Nothing here</h1>
+        <p>That page does not exist. The editor is on the home page.</p>
+        <div className="row">
+          <a href="/" className="btn">
+            Open the editor
+          </a>
+        </div>
       </section>
     </main>
   )
@@ -44,26 +52,28 @@ function RootError({ error, reset }: ErrorComponentProps) {
 export const Route = createRootRoute({
   head: () => ({
     meta: [
-      {
-        charSet: 'utf-8',
-      },
+      { charSet: 'utf-8' },
       {
         name: 'viewport',
-        content: 'width=device-width, initial-scale=1',
+        content: 'width=device-width, initial-scale=1, viewport-fit=cover',
       },
       {
-        title: 'Image Editor',
+        name: 'description',
+        content:
+          'Edit a photo by describing the change. Runs on a GPU on demand, and images are never stored.',
       },
-    ],
-    links: [
       {
-        rel: 'stylesheet',
-        href: appCss,
+        name: 'theme-color',
+        content: '#0a0b0d',
+        media: '(prefers-color-scheme: dark)',
       },
+      { title: 'Image Editor' },
     ],
+    links: [{ rel: 'stylesheet', href: appCss }],
   }),
   shellComponent: RootDocument,
   errorComponent: RootError,
+  notFoundComponent: NotFound,
 })
 
 function RootDocument({ children }: { children: React.ReactNode }) {
@@ -73,15 +83,14 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         <HeadContent />
       </head>
-      <body className="flex min-h-screen flex-col font-sans antialiased [overflow-wrap:anywhere]">
-        <Header />
-        <div className="flex flex-col lg:flex-1">{children}</div>
-        <Footer />
+      <body>
+        <div className="shell">
+          <Header />
+          {children}
+        </div>
         <Toaster />
         <TanStackDevtools
-          config={{
-            position: 'bottom-right',
-          }}
+          config={{ position: 'bottom-right' }}
           plugins={[
             {
               name: 'Tanstack Router',

@@ -73,7 +73,7 @@ export default function ThemeToggle() {
       onClick={toggleMode}
       aria-label={label}
       title={label}
-      className="btn-quiet grid h-10 w-10 shrink-0 place-items-center"
+      className="btn-icon"
     >
       {mode === 'light' && <SunIcon />}
       {mode === 'dark' && <MoonIcon />}

@@ -1,9 +1,15 @@
+import CreditChip from './CreditChip'
 import ThemeToggle from './ThemeToggle'
 
 export default function Header() {
   return (
-    <header className="sticky top-0 z-50 bg-[var(--header-bg)] backdrop-blur-xl">
-      <div className="page-wrap flex items-center justify-end py-3">
+    <header className="topbar">
+      <div className="brand">
+        <i aria-hidden="true" />
+        image<span>editor</span>
+      </div>
+      <div className="topbar-right">
+        <CreditChip />
         <ThemeToggle />
       </div>
     </header>
