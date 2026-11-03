@@ -695,8 +695,14 @@ function App() {
               aria-label="Stop waiting"
               title="This stops the wait. Modal cannot cancel a call already running, so the GPU may still finish and bill."
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <rect x="7.5" y="7.5" width="9" height="9" rx="2" />
+              <svg
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                aria-hidden="true"
+                width="20"
+                height="20"
+              >
+                <rect x="6.5" y="6.5" width="11" height="11" rx="2.5" />
               </svg>
             </button>
           ) : (
