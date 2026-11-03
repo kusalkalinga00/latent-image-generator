@@ -725,6 +725,36 @@ def usage() -> dict[str, Any]:
 
 
 @app.local_entrypoint()
+def smoke_generate(
+    prompt: str = "A lighthouse on a cliff at dusk, long exposure, cinematic",
+    aspect: str = DEFAULT_ASPECT,
+) -> None:
+    """One real generation on the deployed GPU class. No HTTP, no auth in the way.
+
+        uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke_generate \
+            --prompt "a red fox in snow" --aspect 1:1
+    """
+    import pathlib
+    import time
+
+    if not prompt.strip():
+        raise SystemExit("pass a --prompt")
+
+    started = time.time()
+    out = _run_generate(prompt, aspect, DEFAULT_STEPS, DEFAULT_CFG, 0)
+
+    out_dir = pathlib.Path("outputs")
+    out_dir.mkdir(exist_ok=True)
+    target = out_dir / f"generate-{int(time.time())}.png"
+    target.write_bytes(out["png"])
+    print(
+        f"generated {target} in {out['seconds']}s "
+        f"({out['steps']} steps, {out['size'][0]}x{out['size'][1]}, {aspect}), "
+        f"{time.time() - started:.1f}s wall"
+    )
+
+
+@app.local_entrypoint()
 def smoke(
     prompt: str = "Make the scene at night with warm street lights",
     image: str = "",

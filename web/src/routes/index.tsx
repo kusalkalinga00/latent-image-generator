@@ -17,7 +17,12 @@ const MAX_EDGE = 1536 // the model works around 1MP; larger just costs GPU secon
 // offer - passing 4 is the honest thing to send.
 const STEPS = 4
 
-const WAIT_STEPS = ['Starting a GPU', 'Loading the model', 'Editing'] as const
+const WAIT_PHASES = {
+  edit: ['Starting a GPU', 'Loading the model', 'Editing'],
+  generate: ['Starting a GPU', 'Loading the model', 'Painting'],
+} as const
+
+type Mode = 'edit' | 'generate'
 
 const DOT_COLS = 26
 const DOT_ROWS = 15
@@ -182,15 +187,24 @@ function Compare({ before, after }: { before: string; after: string }) {
  * cold start somewhere to live: the caption names the phase, so 30 seconds of
  * loading reads as a step rather than a stall.
  */
-function Sketching({ elapsed, warmed }: { elapsed: number; warmed: boolean }) {
+function Sketching({
+  elapsed,
+  warmed,
+  mode,
+}: {
+  elapsed: number
+  warmed: boolean
+  mode: Mode
+}) {
   const phase = waitStep(elapsed, warmed)
   const progress = Math.round(waitProgress(elapsed, warmed))
   const filled = Math.round((DOT_TOTAL * progress) / 100)
+  const label = WAIT_PHASES[mode][phase]
 
   return (
     <div className="matrix-block">
       <p className="matrix-caption">
-        {WAIT_STEPS[phase]} · {elapsed.toFixed(0)}s
+        {label} · {elapsed.toFixed(0)}s
       </p>
       <div className="matrix-field">
         <div
@@ -200,7 +214,7 @@ function Sketching({ elapsed, warmed }: { elapsed: number; warmed: boolean }) {
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={progress}
-          aria-label={`${WAIT_STEPS[phase]}, ${progress}%`}
+          aria-label={`${label}, ${progress}%`}
         >
           {DOT_ORDER.map((rank, index) => (
             <i key={index} className={rank < filled ? 'on' : undefined} />
@@ -226,7 +240,7 @@ function App() {
   const [errorText, setErrorText] = useState('')
   const [lastPrompt, setLastPrompt] = useState('')
   // What the picture on the stage is: an edited photo, or one from nothing.
-  const [lastMode, setLastMode] = useState<'edit' | 'generate'>('edit')
+  const [lastMode, setLastMode] = useState<Mode>('edit')
   const [aspect, setAspect] = useState<Aspect>('1:1')
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
@@ -406,7 +420,9 @@ function App() {
       setStatus('done')
       pushToast(
         'success',
-        out.seconds ? `Edit ready in ${out.seconds}s.` : 'Edit ready.',
+        out.seconds
+          ? `${mode === 'generate' ? 'Generated' : 'Edit ready'} in ${out.seconds}s.`
+          : 'Ready.',
       )
       // The credit chip is the only place remaining budget is shown, and this is
       // the only moment it moves.
@@ -503,7 +519,11 @@ function App() {
             {lastPrompt && <p className="bubble">{lastPrompt}</p>}
 
             {running ? (
-              <Sketching elapsed={elapsed} warmed={warmed.current} />
+              <Sketching
+                elapsed={elapsed}
+                warmed={warmed.current}
+                mode={lastMode}
+              />
             ) : (
               <>
                 <figure className="frame">
