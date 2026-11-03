@@ -828,6 +828,16 @@ button {
   opacity: 0.7;
 }
 
+.only-pointer {
+  /* a phone has no ⌘, so the hint is noise there */
+}
+
+@media (max-width: 760px) {
+  .only-pointer {
+    display: none;
+  }
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1058,6 +1068,19 @@ button {
 
   .suggestions {
     display: none;
+  }
+
+  /* the model name plus three actions cannot share a line at this width */
+  .stage-bar {
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+  }
+
+  .stage-bar .acts {
+    flex-wrap: wrap;
+    justify-content: center;
   }
 
   .composer {

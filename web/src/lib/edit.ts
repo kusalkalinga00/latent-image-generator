@@ -34,6 +34,7 @@ export interface GenerateInput {
 export interface EditOutput {
   ok: boolean
   mode?: 'edit' | 'generate'
+  model?: string
   imageBase64?: string
   seconds?: number
   steps?: number
@@ -135,6 +136,7 @@ async function callModal(
     let body: {
       ok?: boolean
       mode?: 'edit' | 'generate'
+      model?: string
       error?: unknown
       image_b64?: string
       seconds?: number
@@ -163,6 +165,7 @@ async function callModal(
     return {
       ok: true,
       mode: body.mode,
+      model: typeof body.model === 'string' ? body.model : undefined,
       imageBase64: body.image_b64,
       seconds: body.seconds,
       steps: body.steps,

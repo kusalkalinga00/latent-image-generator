@@ -237,6 +237,8 @@ function App() {
   )
   const [resultUrl, setResultUrl] = useState('')
   const [resultMeta, setResultMeta] = useState('')
+  // Straight from the backend, which knows which checkpoint it called.
+  const [resultModel, setResultModel] = useState('')
   const [errorText, setErrorText] = useState('')
   const [lastPrompt, setLastPrompt] = useState('')
   // What the picture on the stage is: an edited photo, or one from nothing.
@@ -416,7 +418,8 @@ function App() {
 
       warmed.current = true
       setResultUrl(`data:image/png;base64,${out.imageBase64}`)
-      setResultMeta(`${out.seconds}s on the GPU · ${out.steps} steps`)
+      setResultMeta(`${out.seconds}s · ${out.steps} steps`)
+      setResultModel(out.model ?? '')
       setStatus('done')
       pushToast(
         'success',
@@ -550,9 +553,13 @@ function App() {
 
                 {done && (
                   <div className="stage-bar">
-                    <span>
-                      {lastMode === 'generate' ? 'Generated' : 'Edited'} ·{' '}
-                      {resultMeta}
+                    <span title={resultModel || undefined}>
+                      {resultModel
+                        ? resultModel.split('/').pop()
+                        : lastMode === 'generate'
+                          ? 'Generated'
+                          : 'Edited'}{' '}
+                      · {resultMeta}
                     </span>
                     <span className="acts">
                       <button
@@ -808,7 +815,8 @@ function App() {
         </form>
 
         <p className="disclaimer">
-          Runs on a GPU on demand · <b>images are not stored</b> · ⌘↵ to send
+          Qwen-Image · on-demand GPU · <b>images are not stored</b>
+          <span className="only-pointer"> · ⌘↵ to send</span>
         </p>
       </div>
 

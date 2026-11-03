@@ -706,6 +706,10 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "mode": mode,
+        # Which checkpoint actually answered. The client shows this next to the
+        # result, so it is read from the same branch that picked the class rather
+        # than inferred on the other side.
+        "model": MODEL_ID if mode == "edit" else T2I_MODEL_ID,
         "image_b64": base64.b64encode(out["png"]).decode("ascii"),
         "seconds": out["seconds"],
         "steps": out["steps"],
