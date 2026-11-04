@@ -47,10 +47,15 @@ The instruction is echoed as a chat bubble above the result, because the thing o
 answer to the sentence you typed — and after a cold start of 40-plus seconds, being able to see
 what you asked for is what tells you the wait was worth it.
 
-A checkerboard icon in the composer asks for a **transparent background**. It applies to both
-jobs: a generated icon or a cut-out subject from a photo. When the result really carries an alpha
-channel the stage draws a checkerboard behind it, so the transparency is visible rather than
-merely claimed.
+The cutout is decided by the **prompt**, not by a switch. A prompt that says "transparent
+background" — or cut-out, no background, remove the background, isolated on white, with alpha —
+turns the cutout on by itself, and the footer says so before you send. The checkerboard icon in
+the composer still overrides that for the session, and reloading returns to auto, so no stale
+choice can quietly defeat a later prompt.
+
+It applies to both jobs: a generated icon or a cut-out subject from a photo. When the result
+really carries an alpha channel the stage draws a checkerboard behind it and the result row is
+marked `transp.`, so transparency is visible rather than merely claimed.
 
 ---
 
