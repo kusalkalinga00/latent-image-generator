@@ -133,12 +133,28 @@ gpu_image = (
     .env({"HF_HOME": MODEL_CACHE, "HF_HUB_DISABLE_TELEMETRY": "1"})
 )
 
+# Where a transparency request gets its alpha channel. The diffusion model is an
+# RGB model: "transparent background" is a visual idiom it has learned to paint
+# (usually as a grey checkerboard), so alpha has to be cut out afterwards - see
+# matting.py for why there are two methods.
+MATTING_HOME = "/models/u2net"
+MATTING_MODEL = "u2net"
+
 # The API layer holds no model, so it needs no torch: it decodes JSON, calls the
 # GPU class, and encodes the result. A light image keeps its cold start and its
-# idle cost near zero.
-api_image = modal.Image.debian_slim(python_version="3.12").uv_pip_install(
-    "fastapi[standard]"
+# idle cost near zero. The matting step runs here rather than on the GPU, because
+# a cutout is CPU work and GPU seconds are a hundred times more expensive.
+api_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .uv_pip_install("fastapi[standard]", "pillow", "numpy", "rembg[cpu]")
+    # The matting code lives in its own module; Modal mounts a single file by
+    # default, so the package has to be added explicitly or the import fails only
+    # once a container is running.
+    .add_local_python_source("modal_app", copy=True)
+    .env({"U2NET_HOME": MATTING_HOME})
 )
+
+
 
 # The distillation scheduler. This cannot be inferred from the LoRA file - it is a
 # property of how the model was distilled, and loading the LoRA onto the pipeline's
@@ -305,6 +321,51 @@ def download_t2i() -> str:
     import json
 
     return json.dumps(_download(T2I_MODEL_ID, T2I_LORA_REPO, T2I_LORA_FILE))
+
+
+@app.function(image=api_image, volumes={"/models": weights}, timeout=300, cpu=1)
+def check_matting() -> str:
+    """Prove the cutout path inside the real API image, on a synthetic image.
+
+    A GPU render costs a cold start; a red square on white costs nothing and
+    exercises the same code: import, key, cleanup, PNG encode.
+    """
+    import io
+    import json
+
+    import numpy as np
+    from modal_app.matting import cutout
+    from PIL import Image
+
+    canvas = Image.new("RGB", (512, 512), (255, 255, 255))
+    for y in range(160, 352):
+        for x in range(160, 352):
+            canvas.putpixel((x, y), (200, 24, 24))
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+
+    out = cutout(buf.getvalue())
+    alpha = np.asarray(Image.open(io.BytesIO(out)))[:, :, 3]
+    info = {
+        "mode": Image.open(io.BytesIO(out)).mode,
+        "transparent": round(float((alpha == 0).mean()), 3),
+        "opaque": round(float((alpha == 255).mean()), 3),
+        "bytes": len(out),
+    }
+    print("[image-editor] matting: " + json.dumps(info))
+    if info["mode"] != "RGBA" or info["transparent"] < 0.5 or info["opaque"] < 0.05:
+        raise RuntimeError(f"cutout looks wrong: {info}")
+    return json.dumps(info)
+
+
+@app.function(image=api_image, volumes={"/models": weights}, timeout=900, cpu=1)
+def download_matting() -> str:
+    """Cache the u2net weights in the Volume so a cold API container does not fetch them."""
+    from rembg import new_session
+
+    new_session(MATTING_MODEL)
+    weights.commit()
+    return "u2net cached"
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=900, cpu=2)
@@ -667,6 +728,10 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     image means generate, an image means edit. That keeps the web app from having
     to know which endpoint to call, and keeps the mode in one place.
 
+    ``transparent: true`` cuts the background out afterwards and returns RGBA. The
+    model itself cannot do this - it renders RGB, and paints a checkerboard when
+    asked for "transparent" - so the alpha channel is produced here, on the CPU.
+
     Images travel base64-encoded in both directions.
     """
     import base64
@@ -703,6 +768,18 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         # can show the user what actually went wrong.
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
+    png = out["png"]
+    transparent = bool(payload.get("transparent"))
+    if transparent:
+        try:
+            from modal_app.matting import cutout
+
+            png = cutout(png)
+        except Exception as exc:
+            # A failed cutout should not lose the image the user waited for.
+            print(f"[image-editor] cutout failed: {type(exc).__name__}: {exc}")
+            transparent = False
+
     return {
         "ok": True,
         "mode": mode,
@@ -710,7 +787,10 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         # result, so it is read from the same branch that picked the class rather
         # than inferred on the other side.
         "model": MODEL_ID if mode == "edit" else T2I_MODEL_ID,
-        "image_b64": base64.b64encode(out["png"]).decode("ascii"),
+        # False when the cutout failed, so the UI never claims an alpha channel
+        # that is not there.
+        "transparent": transparent,
+        "image_b64": base64.b64encode(png).decode("ascii"),
         "seconds": out["seconds"],
         "steps": out["steps"],
         "size": out["size"],

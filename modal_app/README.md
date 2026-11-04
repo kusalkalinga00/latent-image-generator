@@ -31,3 +31,18 @@ uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
 
 Both endpoints require Modal proxy auth and scale to zero. See `docs/COST.md` for
 the measured cost model — in particular, that the 60-second idle window is billed.
+
+## Transparency
+
+The models render RGB and cannot emit alpha; asked for a transparent background
+they paint a checkerboard. `transparent: true` on the request cuts the background
+out afterwards in the CPU container (`matting.py`: geometric key for flat art,
+u2net for photos), and `transparent` in the response says whether it worked.
+
+```sh
+# prove the cutout path without renting a GPU
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_matting
+
+# cache the 176 MB u2net weights in the Volume (one-off)
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_matting
+```

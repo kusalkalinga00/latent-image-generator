@@ -47,6 +47,11 @@ The instruction is echoed as a chat bubble above the result, because the thing o
 answer to the sentence you typed — and after a cold start of 40-plus seconds, being able to see
 what you asked for is what tells you the wait was worth it.
 
+A checkerboard icon in the composer asks for a **transparent background**. It applies to both
+jobs: a generated icon or a cut-out subject from a photo. When the result really carries an alpha
+channel the stage draws a checkerboard behind it, so the transparency is visible rather than
+merely claimed.
+
 ---
 
 ## Architecture
@@ -194,7 +199,9 @@ image-editor/
 │   └── .env.example              3 required variables, no VITE_ prefix
 │
 ├── modal_app/
-│   └── src/modal_app/app.py      the whole GPU service: 2 classes, 2 endpoints, 5 helpers
+│   └── src/modal_app/
+│       ├── app.py                the GPU service: 2 classes, 2 endpoints, helpers
+│       └── matting.py            RGB → RGBA: geometric key, or u2net for photos
 │
 ├── scripts/edit.py               CLI client for the deployed endpoint
 ├── docs/COST.md                  the longer cost argument
@@ -306,12 +313,17 @@ Content-Type: application/json
   "ok": true,
   "mode": "edit" | "generate",
   "model": "Qwen/Qwen-Image-Edit-2511",
+  "transparent": false,
   "image_b64": "iVBOR...",
   "seconds": 3.61,
   "steps": 4,
   "size": [896, 1184]
 }
 ```
+
+`transparent` reflects what actually happened, not what was asked: if the cutout fails the field
+is `false` and the image is returned intact, because losing a render the user waited for is worse
+than returning one without alpha.
 
 The mode is decided by **whether `image_b64` arrived**, not by a flag. That keeps the rule in one
 place: the client cannot ask for a generate while sending a photo, and the API function is the
@@ -320,6 +332,31 @@ only thing that has to branch.
 Failures are JSON with `ok: false` and a one-line `error`, never an opaque 500 — the web app
 distinguishes "your token is wrong" (HTTP 401 from proxy auth) from "the model failed" (200 with
 `ok: false`) by shape alone.
+
+### Transparency is post-processing, not generation
+
+The models are RGB. Asked for a "transparent background", Qwen paints a **grey checkerboard** —
+that is the visual idiom it learned, not an alpha channel — and the pipeline would save RGB in any
+case. So the request carries `transparent: true` and the API function cuts the background out
+after the render, on CPU, which costs nothing next to a GPU second.
+
+`matting.py` has two methods and picks one:
+
+| Method | When | Why |
+|---|---|---|
+| Geometric key | flat illustration on a flat field | an exact mask: hard edges, every detail kept. This is most of what people want a cutout for |
+| Model matte (u2net) | photographs and busy backgrounds | a key has nothing to hold on to |
+
+Both are finished the same way: one pixel of erosion (the checkerboard is anti-aliased into the
+subject's outline, and without that the cutout keeps a grey fringe on a light page) and a half
+pixel of feather. The u2net mask is soft — an interior at alpha 254 is technically translucent —
+so it is pushed through a curve first to make solid pixels solid.
+
+`check_matting` proves the whole path on a synthetic red square, on CPU, for cents:
+
+```sh
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_matting
+```
 
 ### Loading order inside a class
 
@@ -525,6 +562,7 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 | Is the Volume intact? | `modal run …::volume_stats` |
 | Does the edit model produce a sane image? | `modal run …::smoke --image … --prompt …` |
 | Does the generate model? | `modal run …::smoke_generate --prompt …` |
+| Does the transparency path work? | `modal run …::check_matting` |
 | Is the app that is deployed the code I just wrote? | `modal app list`, then compare deploy time |
 
 `smoke` and `smoke_generate` call the **deployed** class through `modal.Cls.from_name`, so they
@@ -559,6 +597,10 @@ for generations.
 
 **A cold start slower than it should be may be a crash loop.** Containers that repeatedly fail to
 start still bill. Check `modal app logs` before optimising anything.
+
+**A checkerboard appears in the generated image.** That is the *model* drawing a checkerboard
+because the prompt asked for a transparent background — it is opaque grey pixels, not alpha. Turn
+on the transparency toggle, or ask for "a plain solid white background" and cut it out later.
 
 **A generation takes ~77 s the first time and ~4 s after.** Two checkpoints, two containers. Any
 edit → generate switch after the 60 s window pays the full load again. Both classes log their own

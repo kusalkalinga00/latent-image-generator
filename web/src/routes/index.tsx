@@ -244,6 +244,10 @@ function App() {
   // What the picture on the stage is: an edited photo, or one from nothing.
   const [lastMode, setLastMode] = useState<Mode>('edit')
   const [aspect, setAspect] = useState<Aspect>('1:1')
+  // The model cannot emit alpha, so this asks the backend to cut the background
+  // out afterwards; `resultAlpha` records whether that actually happened.
+  const [transparent, setTransparent] = useState(false)
+  const [resultAlpha, setResultAlpha] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
 
@@ -399,10 +403,17 @@ function App() {
                 prompt: instruction,
                 steps: STEPS,
                 seed,
+                transparent,
               },
             })
           : await generateImage({
-              data: { prompt: instruction, steps: STEPS, seed, aspect },
+              data: {
+                prompt: instruction,
+                steps: STEPS,
+                seed,
+                aspect,
+                transparent,
+              },
             })
 
       if (runId.current !== id) return
@@ -420,6 +431,7 @@ function App() {
       setResultUrl(`data:image/png;base64,${out.imageBase64}`)
       setResultMeta(`${out.seconds}s · ${out.steps} steps`)
       setResultModel(out.model ?? '')
+      setResultAlpha(out.transparent === true)
       setStatus('done')
       pushToast(
         'success',
@@ -459,6 +471,7 @@ function App() {
     setResultMeta('')
     setErrorText('')
     setLastPrompt('')
+    setResultAlpha(false)
     setStatus('idle')
   }
 
@@ -529,7 +542,9 @@ function App() {
               />
             ) : (
               <>
-                <figure className="frame">
+                <figure
+                  className={`frame${done && resultAlpha ? ' is-alpha' : ''}`}
+                >
                   {done && preview ? (
                     <Compare before={preview} after={resultUrl} />
                   ) : done && resultUrl ? (
@@ -739,6 +754,36 @@ function App() {
             }
             readOnly={running}
           />
+
+          <button
+            type="button"
+            className={`icon-toggle${transparent ? ' is-on' : ''}`}
+            onClick={() => setTransparent((v) => !v)}
+            aria-pressed={transparent}
+            aria-label="Transparent background"
+            title={
+              transparent
+                ? 'Background will be cut out (PNG with alpha)'
+                : 'Cut the background out of the result'
+            }
+            disabled={running}
+          >
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect
+                x="3.6"
+                y="3.6"
+                width="16.8"
+                height="16.8"
+                rx="3.4"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              />
+              <path
+                d="M6.2 6.2h5.8v5.8H6.2zM12 12h5.8v5.8H12z"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
 
           {attachments.length === 0 && !running && (
             <label className="shape">

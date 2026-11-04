@@ -22,6 +22,7 @@ export interface EditInput {
   prompt: string
   steps: number
   seed: number
+  transparent?: boolean
 }
 
 export interface GenerateInput {
@@ -29,12 +30,15 @@ export interface GenerateInput {
   steps: number
   seed: number
   aspect: Aspect
+  transparent?: boolean
 }
 
 export interface EditOutput {
   ok: boolean
   mode?: 'edit' | 'generate'
   model?: string
+  /** True when the backend returned a cut-out with a real alpha channel. */
+  transparent?: boolean
   imageBase64?: string
   seconds?: number
   steps?: number
@@ -68,6 +72,7 @@ interface ModalPayload {
   steps: number
   seed: number
   aspect?: string
+  transparent?: boolean
 }
 
 function failed(error: string): EditOutput {
@@ -137,6 +142,7 @@ async function callModal(
       ok?: boolean
       mode?: 'edit' | 'generate'
       model?: string
+      transparent?: boolean
       error?: unknown
       image_b64?: string
       seconds?: number
@@ -166,6 +172,7 @@ async function callModal(
       ok: true,
       mode: body.mode,
       model: typeof body.model === 'string' ? body.model : undefined,
+      transparent: body.transparent === true,
       imageBase64: body.image_b64,
       seconds: body.seconds,
       steps: body.steps,
@@ -211,6 +218,7 @@ export const editImage = createServerFn({ method: 'POST' })
         prompt: data.prompt.trim(),
         steps: data.steps,
         seed: data.seed,
+        transparent: data.transparent === true,
       },
       'edit',
     )
@@ -242,6 +250,7 @@ export const generateImage = createServerFn({ method: 'POST' })
         steps: data.steps,
         seed: data.seed,
         aspect: data.aspect,
+        transparent: data.transparent === true,
       },
       'generate',
     )
