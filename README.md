@@ -521,13 +521,22 @@ the CLI's names breaks the CLI with `Token ID is malformed`.
 
 ### 8. Deploy the web app
 
+The Vercel project's **Root Directory is `web`**, so the deploy runs from the *repository root*:
+
 ```sh
-pnpm dlx vercel deploy --prod
+pnpm dlx vercel deploy --prod      # from the repo root, not from web/
 ```
 
-Then set the same three variables in **Vercel → Settings → Environment Variables** and redeploy.
+Running it from inside `web/` makes Vercel look for `web/web` and fail with
+`The specified Root Directory "web" does not exist`. That is the single most likely deploy
+failure, and it fails the same way whether it is typed by hand or copied from an older README.
+
+Then set the three variables in **Vercel → Settings → Environment Variables** and redeploy.
 `web/vercel.json` declares `framework: tanstack-start`; Vercel builds through Nitro. The Hobby
 plan allows up to 300 s per function, which fits a cold start plus an edit.
+
+Deployment **URLs** are protected by Vercel authentication (a fine default), but the production
+**alias** is public — that is the link to share.
 
 ---
 
@@ -587,6 +596,9 @@ live in subfolders; the processor needs `subfolder="processor"`.
 
 **Faint grid over an otherwise plausible image** — the LoRA is attached to a default scheduler.
 Rebuild it with `LIGHTNING_SCHEDULER_CONFIG`.
+
+**`The specified Root Directory "web" does not exist`** — the deploy was run from inside `web/`.
+The project already has `web` as its Root Directory; run it from the repo root.
 
 **A 401 from the web app** — the proxy token is wrong, not the model. The server logs Modal's
 status and body so the two are distinguishable.
