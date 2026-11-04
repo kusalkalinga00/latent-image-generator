@@ -61,47 +61,44 @@ marked `transp.`, so transparency is visible rather than merely claimed.
 
 ## Architecture
 
-```text
-                                  ┌──────────────────────────────────────────────┐
-   Browser                        │  Vercel  ·  TanStack Start (React 19)        │
-   ───────                        │                                              │
-   · no secrets anywhere    POST  │  routes/index.tsx      the studio, client    │
-   · never calls Modal   ────────▶│        │                                     │
-     directly                     │        └─ createServerFn                     │
-                                  │             src/lib/edit.ts   ── held here ──┼──┐
-                                  │             src/lib/credit.ts                │  │
-                                  │                                              │  │
-                                  └──────────────────────────────────────────────┘  │
-                                                                                    │
-                              HTTPS · Authorization: Bearer <wk-id>.<ws-secret>     │
-                              (Modal proxy auth — the credential never leaves here) │
-                                                                                    ▼
-                 ┌───────────────────────────────────────────────────────────────────────┐
-                 │  Modal app "image-editor"   (one region, e.g. us-east)                │
-                 │                                                                       │
-                 │   POST api()                  GET usage()                              │
-                 │   ├─ image_b64 present        └─ billing summary → remaining credit   │
-                 │   │    → Editor.edit          (CPU only, never starts a GPU)          │
-                 │   └─ image_b64 empty                                                  │
-                 │        → Painter.generate                                             │
-                 └───────────────┬───────────────────────────────┬───────────────────────┘
-                                 │                               │
-                     ┌───────────▼──────────┐        ┌───────────▼───────────┐
-                     │ Editor               │        │ Painter               │
-                     │ Qwen-Image-Edit-2511 │        │ Qwen-Image-2512       │
-                     │ + 4-step LoRA        │        │ + 4-step LoRA         │
-                     │ H100 80 GB · 1 max   │        │ H100 80 GB · 1 max    │
-                     │ 60 s scaledown       │        │ 60 s scaledown        │
-                     └───────────┬──────────┘        └───────────┬───────────┘
-                                 │                               │
-                                 └───────────────┬───────────────┘
-                                                 ▼
-                                 ┌───────────────────────────────┐
-                                 │ Modal Volume                  │
-                                 │ image-editor-weights          │
-                                 │ 2 × ~54 GiB checkpoints       │
-                                 │ storage free under 1 TiB      │
-                                 └───────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph BROWSER["Browser — holds no secrets"]
+    UI["routes/index.tsx<br/>composer · stage · result"]
+  end
+
+  subgraph VERCEL["Vercel · TanStack Start (Node runtime)"]
+    FN["createServerFn<br/>lib/edit.ts"]
+    CR["createServerFn<br/>lib/credit.ts"]
+    ENV["process.env<br/>IMAGE_EDITOR_API_URL<br/>IMAGE_EDITOR_PROXY_TOKEN"]
+  end
+
+  subgraph MODAL["Modal · image-editor app"]
+    API["POST api()<br/>route by payload"]
+    USE["GET usage()<br/>billing summary"]
+    subgraph EDITOR["Editor · class"]
+      ED["Qwen-Image-Edit-2511<br/>+ 4-step Lightning LoRA<br/>H100 80 GB"]
+    end
+    subgraph PAINTER["Painter · class"]
+      PN["Qwen-Image-2512<br/>+ 4-step Lightning LoRA<br/>H100 80 GB"]
+    end
+    MAT["matting.py · CPU container<br/>geometric key or u2net"]
+  end
+
+  VOL[("Modal Volume<br/>image-editor-weights<br/>2 × ~54 GiB")]
+
+  UI -->|"prompt + optional photo"| FN
+  UI -->|"credit, on load"| CR
+  FN -.->|"reads"| ENV
+  CR -.->|"reads"| ENV
+  FN ==>|"HTTPS + Bearer"| API
+  CR ==>|"HTTPS + Bearer"| USE
+  API -->|"image_b64 present → edit"| ED
+  API -->|"no image_b64 → generate"| PN
+  ED --> MAT
+  PN --> MAT
+  ED -.->|"loads weights"| VOL
+  PN -.->|"loads weights"| VOL
 ```
 
 Three consequences of that shape, each deliberate:
@@ -125,25 +122,63 @@ the ceiling at two cards instead of unbounded.
 
 ## Request lifecycle
 
-```text
- user                browser                        Vercel fn                Modal                GPU
-  │                     │                               │                      │                   │
-  ├─ types a prompt ───▶│                               │                      │                   │
-  ├─ presses enter ────▶│ validate (prompt, image ≤3)   │                      │                   │
-  │                     ├── POST serverFn ─────────────▶│                      │                   │
-  │                     │                               │ read env, POST ─────▶│ proxy auth        │
-  │                     │                               │                      │ route by payload  │
-  │                     │                               │                      ├─ cold? load 30-70 s
-  │                     │◀── dots fill, elapsed ticks ──┤                      │                   │
-  │                     │                               │                      │ 4 denoise steps ─▶│
-  │                     │                               │◀──── PNG + seconds ──┤                   │
-  │                     │◀── {ok, mode, model, image_b64}                      │                   │
-  │◀── result + wipe ───┤                               │                      │                   │
-  │                     │                               │                      │ 60 s idle ──▶ down
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as You
+  participant B as Browser
+  participant F as Vercel function
+  participant A as Modal api()
+  participant G as GPU container
+
+  U->>B: prompt, plus a photo if there is one
+  B->>B: validate, downscale to 1536 px long edge
+  B->>F: POST server function
+  F->>F: read env, attach Bearer token
+  F->>A: POST api()
+  A->>A: image present ? edit : generate
+  opt container is asleep
+    A->>G: cold start, 54 GiB to load, 30-70 s
+  end
+  A->>G: 4 denoise steps
+  G-->>A: a PNG
+  opt transparency was asked for
+    A->>A: cut the background out, on CPU
+  end
+  A-->>F: ok, mode, model, image_b64, transparent
+  F-->>B: JSON
+  B-->>U: image, model name, seconds
+  Note over G: idle for 60 s, then it goes away
 ```
 
 The client polls nothing and streams nothing. One request, one response, one image; the progress
 UI is a client-side estimate (see [the wait](#the-wait-is-an-estimate-not-a-feed)).
+
+### The flow, in words
+
+1. **You write a prompt and maybe drop a photo.** The composer decides what you are asking for by
+   what is attached: a photo means *edit this*, nothing means *make this*. There is no mode
+   selector to get wrong.
+2. **The browser prepares the payload.** The photo is downscaled to a 1536 px long edge in a
+   canvas before it leaves — a 12 MP phone photo is a slow upload and a larger tensor for no
+   visible gain. The prompt is checked for length, and the transparency intent is read from it
+   (see [transparency](#transparency-is-post-processing-not-generation)).
+3. **It calls a server function, not Modal.** `lib/edit.ts` runs on Vercel, reads the endpoint URL
+   and proxy token from `process.env` *inside* the handler, and makes the outbound request with a
+   `Bearer` header. This is the whole point of the indirection: a credential in the browser bundle
+   is a credential given away.
+4. **Modal picks the job from the payload.** `image_b64` present routes to `Editor`, absent routes
+   to `Painter`. One endpoint, so the client never contains routing logic that could disagree with
+   the service.
+5. **A cold container loads its weights first.** 54 GiB off the Volume takes 30–70 s; a warm one
+   skips straight to the render. This is the only genuinely slow step, and it is why the UI shows
+   elapsed time instead of pretending to measure progress.
+6. **Four denoise steps, then a PNG.** At CFG 1.0 with the Lightning LoRA, four steps is the
+   recipe the scheduler was distilled for. Typical denoise time is 3–4 s.
+7. **The background is cut out if it was asked for,** on the CPU container, then the JSON comes
+   back with `mode`, `model`, `transparent`, `seconds` and the image as base64.
+8. **The page renders the answer** — image, the model that made it, the time, and whether it
+   carries alpha — and the GPU container sits idle for 60 s before scaling to zero.
 
 ---
 
