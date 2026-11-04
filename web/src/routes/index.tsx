@@ -68,6 +68,16 @@ function waitProgress(elapsed: number, warmed: boolean) {
 
 // Short enough to scan as chips; the point is to show the range of edits, not to
 // write the prompt for the user.
+/**
+ * Does the prompt ask for a background-free image?
+ *
+ * Deliberately narrow: these are phrases about the *output*, not about what is in
+ * the picture. "a transparent glass" would match too, and cutting the background
+ * out of that is still the sane reading.
+ */
+const WANTS_CUTOUT =
+  /transparen\w*|\bcut\s?-?out\b|no\s+background|remove\s+(the\s+)?background|plain\s+(white|solid)\s+background|isolated\s+on\s+(white|plain)|with\s+alpha\b/i
+
 const EXAMPLES = [
   'Night with warm street lights',
   'Watercolour painting',
@@ -246,7 +256,12 @@ function App() {
   const [aspect, setAspect] = useState<Aspect>('1:1')
   // The model cannot emit alpha, so this asks the backend to cut the background
   // out afterwards; `resultAlpha` records whether that actually happened.
-  const [transparent, setTransparent] = useState(false)
+  //
+  // Default is "decide from the prompt", because a prompt that says "transparent
+  // background" is asking for exactly this and should not require finding a
+  // 18-pixel icon. A click sets an explicit override for the session; reloading
+  // returns to auto, so no stale choice can silently defeat a later prompt.
+  const [cutoutOverride, setCutoutOverride] = useState<boolean | null>(null)
   const [resultAlpha, setResultAlpha] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
@@ -501,7 +516,7 @@ function App() {
     if (!resultUrl) return
     const a = document.createElement('a')
     a.href = resultUrl
-    a.download = `edited-${Date.now()}.png`
+    a.download = `${resultAlpha ? 'cutout' : 'edited'}-${Date.now()}.png`
     a.click()
     pushToast('success', 'Download started.')
   }
@@ -511,6 +526,8 @@ function App() {
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
+  const wantedCutout = WANTS_CUTOUT.test(prompt)
+  const transparent = cutoutOverride ?? wantedCutout
   const running = status === 'running'
   const full = attachments.length >= MAX_IMAGES
   const done = status === 'done' && Boolean(resultUrl)
@@ -575,6 +592,7 @@ function App() {
                           ? 'Generated'
                           : 'Edited'}{' '}
                       · {resultMeta}
+                      {resultAlpha && ' · transp.'}
                     </span>
                     <span className="acts">
                       <button
@@ -758,13 +776,17 @@ function App() {
           <button
             type="button"
             className={`icon-toggle${transparent ? ' is-on' : ''}`}
-            onClick={() => setTransparent((v) => !v)}
+            onClick={() => setCutoutOverride(!transparent)}
             aria-pressed={transparent}
             aria-label="Transparent background"
             title={
               transparent
-                ? 'Background will be cut out (PNG with alpha)'
-                : 'Cut the background out of the result'
+                ? cutoutOverride === null
+                  ? 'Your prompt asks for transparency, so the background will be cut out. Click to keep it.'
+                  : 'Background will be cut out (PNG with alpha). Click to keep it.'
+                : wantedCutout
+                  ? 'Turned off for this prompt, though it asks for transparency. Click to cut it out.'
+                  : 'Cut the background out of the result'
             }
             disabled={running}
           >
@@ -861,6 +883,7 @@ function App() {
 
         <p className="disclaimer">
           Qwen-Image · on-demand GPU · <b>images are not stored</b>
+          {transparent && ' · background cut out'}
           <span className="only-pointer"> · ⌘↵ to send</span>
         </p>
       </div>
