@@ -1047,8 +1047,9 @@ function App() {
         </form>
 
         <p className="disclaimer">
-          Qwen-Image · on-demand GPU · <b>images are not stored</b>
-          {transparent && ' · background cut out'}
+          Qwen-Image ·{narrow ? ' ' : ' on-demand GPU · '}
+          <b>images are not stored</b>
+          {transparent && ' · cutout'}
           <span className="only-pointer"> · ⌘↵ to send</span>
         </p>
       </div>

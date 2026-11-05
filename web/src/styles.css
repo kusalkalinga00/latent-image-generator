@@ -1069,6 +1069,7 @@ button {
   color: var(--ink-3);
   font-size: 11.5px;
   text-align: center;
+  text-wrap: balance;
 }
 
 .disclaimer b {
