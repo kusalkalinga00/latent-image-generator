@@ -130,11 +130,11 @@ button {
 
 /* top chrome sits on the canvas, not above it */
 .top {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
+  /* In flow, not floating over the stage: once the stage scrolls, an absolute
+   * header has the prompt bubble sliding underneath its text. */
+  position: relative;
   z-index: 20;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -315,7 +315,7 @@ button {
   place-items: safe center;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 62px 20px 26px;
+  padding: 16px 20px 26px;
   scrollbar-width: none;
 }
 
@@ -1237,7 +1237,7 @@ button {
   }
 
   .stage {
-    padding: 54px 12px 0;
+    padding: 12px 12px 0;
   }
 
   .thread {
