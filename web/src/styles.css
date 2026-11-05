@@ -911,9 +911,12 @@ button {
   color: var(--ink-2);
 }
 
-.shape select {
+.shape-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   height: 30px;
-  padding: 0 24px 0 11px;
+  padding: 0 10px 0 12px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: transparent;
@@ -921,27 +924,93 @@ button {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
 }
 
-.shape select:hover {
+.shape-trigger:hover,
+.shape-trigger[aria-expanded='true'] {
   border-color: var(--line-strong);
   color: var(--ink);
 }
 
-.shape > svg {
-  position: absolute;
-  right: 8px;
+.shape-trigger svg {
   width: 12px;
   height: 12px;
-  pointer-events: none;
   opacity: 0.7;
+  transition: transform 140ms var(--ease);
 }
 
-/* Shown only where the pill has no room for the word "Square". */
-.shape .glyph {
-  display: none;
+.shape-trigger[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+/* Opens upward, anchored to the control that opened it, unlike the OS popup
+ * which put a list over the headline several hundred pixels away. */
+.shape-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 60;
+  min-width: 186px;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--panel-2);
+  box-shadow: 0 20px 44px rgb(0 0 0 / 42%);
+  animation: shape-menu-in 130ms var(--ease);
+}
+
+@keyframes shape-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.shape-choice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.shape-choice:hover {
+  background: var(--panel-3);
+  color: var(--ink);
+}
+
+.shape-choice.is-on {
+  color: var(--ink);
+}
+
+.shape-glyph {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  opacity: 0.8;
+}
+
+.shape-check {
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  color: var(--accent);
 }
 
 .only-pointer {
@@ -1271,16 +1340,14 @@ button {
     height: 28px;
   }
 
-  .shape select {
+  .shape-trigger {
     height: 34px;
-    padding: 0 26px 0 13px;
-    font-size: 12px;
+    padding: 0 11px 0 13px;
   }
 
-  .shape > svg {
-    right: 9px;
-    width: 12px;
-    height: 12px;
+  .shape-choice {
+    height: 40px;
+    font-size: 14px;
   }
 
   .dock {

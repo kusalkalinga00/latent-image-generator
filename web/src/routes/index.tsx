@@ -130,30 +130,116 @@ function ShapeControl({
   value: Aspect
   onChange: (next: Aspect) => void
 }) {
+  const [open, setOpen] = useState(false)
+  const wrap = useRef<HTMLDivElement>(null)
+
+  // A native <select> cannot be styled and its popup is placed by the OS — on a
+  // phone it landed over the headline, far from the control that opened it. This
+  // is the same list, drawn where it belongs.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent) => {
+      if (!wrap.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const options = Object.keys(ASPECT_LABELS) as Aspect[]
+
   return (
-    <label className="shape">
-      <span className="sr-only">Image shape</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value as Aspect)}
-        aria-label="Image shape"
+    <div className="shape" ref={wrap}>
+      <button
+        type="button"
+        className="shape-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Image shape: ${ASPECT_LABELS[value]}`}
+        onClick={() => setOpen((was) => !was)}
       >
-        {(Object.keys(ASPECT_LABELS) as Aspect[]).map((option) => (
-          <option key={option} value={option}>
-            {ASPECT_LABELS[option]}
-          </option>
-        ))}
-      </select>
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
+        <span>{ASPECT_LABELS[value]}</span>
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          aria-hidden="true"
+        >
+          <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && (
+        <ul className="shape-menu" role="listbox" aria-label="Image shape">
+          {options.map((option) => (
+            <li key={option}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={option === value}
+                className={`shape-choice${option === value ? ' is-on' : ''}`}
+                onClick={() => {
+                  onChange(option)
+                  setOpen(false)
+                }}
+              >
+                <ShapeGlyph aspect={option} />
+                <span>{ASPECT_LABELS[option]}</span>
+                {option === value && (
+                  <svg
+                    className="shape-check"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.4"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M5 12.5l4.5 4.5L19 7"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/** The aspect, drawn to scale — a word says "Wide", this shows how wide. */
+function ShapeGlyph({ aspect }: { aspect: Aspect }) {
+  const [w, h] = aspect.split(':').map(Number)
+  const long = 14
+  const width = w >= h ? long : (long * w) / h
+  const height = h >= w ? long : (long * h) / w
+  return (
+    <svg
+      className="shape-glyph"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <rect
+        x={(16 - width) / 2}
+        y={(16 - height) / 2}
+        width={width}
+        height={height}
+        rx="1.6"
         stroke="currentColor"
-        strokeWidth="2"
-        aria-hidden="true"
-      >
-        <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </label>
+        strokeWidth="1.4"
+      />
+    </svg>
   )
 }
 
