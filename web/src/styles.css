@@ -310,8 +310,17 @@ button {
   width: min(100%, calc(var(--column) + 40px));
   min-height: 0;
   margin-inline: auto;
-  place-items: center;
+  /* `safe center` keeps the top of a too-tall thread reachable; plain centring
+   * pushes it under the header where scrolling cannot recover it. */
+  place-items: safe center;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 62px 20px 26px;
+  scrollbar-width: none;
+}
+
+.stage::-webkit-scrollbar {
+  display: none;
 }
 
 .stage.is-hot::after {
@@ -1367,5 +1376,14 @@ button {
     font-size: 10.5px;
     line-height: 1.5;
     padding: 0 6px;
+  }
+
+  /* bottom-right is the composer on a phone, so toasts move under the header */
+  .toaster {
+    top: calc(60px + env(safe-area-inset-top));
+    right: 10px;
+    bottom: auto;
+    left: 10px;
+    max-width: none;
   }
 }

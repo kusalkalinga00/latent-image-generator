@@ -491,6 +491,31 @@ function App() {
     return () => clearInterval(id)
   }, [status])
 
+  const stageRef = useRef<HTMLElement>(null)
+
+  // When a result arrives the thread is usually taller than the stage on a phone
+  // with browser toolbars, and the natural resting position is the top — which
+  // leaves Download and "Edit this result" clipped below the fold.
+  useEffect(() => {
+    if (status !== 'done') return
+    const el = stageRef.current
+    if (!el) return
+    const pin = () => {
+      if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight
+    }
+    // The image is decoded after paint, so one frame is too early to measure the
+    // thread; a second frame plus a short settle covers the decode.
+    const first = requestAnimationFrame(() => {
+      pin()
+      requestAnimationFrame(pin)
+    })
+    const settle = window.setTimeout(pin, 250)
+    return () => {
+      cancelAnimationFrame(first)
+      clearTimeout(settle)
+    }
+  }, [status, resultUrl])
+
   // A narrow pill cannot hold the long placeholder without wrapping it into the
   // textarea's own height, so phones get the short one. Declared before the
   // measuring effect because that effect depends on it.
@@ -770,6 +795,7 @@ function App() {
   return (
     <>
       <main
+        ref={stageRef}
         className={`stage${dragging ? ' is-hot' : ''}`}
         onDragOver={(e) => {
           e.preventDefault()
