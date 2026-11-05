@@ -373,27 +373,56 @@ function Sketching({
 }) {
   const phase = waitStep(elapsed, warmed)
   const progress = Math.round(waitProgress(elapsed, warmed))
-  const filled = Math.round((DOT_TOTAL * progress) / 100)
   const label = WAIT_PHASES[mode][phase]
 
+  // The grid used to be 26 columns flat, which is 429px of dots and gap: wider
+  // than a 375px phone, and it dragged the whole thread — and the prompt bubble
+  // in it — off the right edge. The column count now comes from the space that
+  // exists, and the dots rendered follow it, so the field always fits and the
+  // percentage still means what it says.
+  const [cols, setCols] = useState(DOT_COLS)
+  const blockRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = blockRef.current
+    if (!el) return
+    const fit = () => {
+      const styles = getComputedStyle(el)
+      const dot = Number.parseFloat(styles.getPropertyValue('--dot')) || 4
+      const gap = Number.parseFloat(styles.getPropertyValue('--gap')) || 15
+      const fitCols = Math.floor((el.clientWidth + gap) / (dot + gap))
+      setCols(Math.max(6, fitCols))
+    }
+    fit()
+    const observer = new ResizeObserver(fit)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  const total = cols * DOT_ROWS
+  const filled = Math.round((total * progress) / 100)
+
   return (
-    <div className="matrix-block">
+    <div className="matrix-block" ref={blockRef}>
       <p className="matrix-caption">
         {label} · {elapsed.toFixed(0)}s
       </p>
       <div className="matrix-field">
         <div
           className="matrix"
-          style={{ '--cols': DOT_COLS } as CSSProperties}
+          style={{ '--cols': cols } as CSSProperties}
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={progress}
           aria-label={`${label}, ${progress}%`}
         >
-          {DOT_ORDER.map((rank, index) => (
-            <i key={index} className={rank < filled ? 'on' : undefined} />
-          ))}
+          {Array.from({ length: total }, (_, index) => {
+            const rank = DOT_ORDER[index % DOT_ORDER.length]
+            return (
+              <i key={index} className={rank < filled ? 'on' : undefined} />
+            )
+          })}
         </div>
         <span className="matrix-pct">{progress}%</span>
       </div>

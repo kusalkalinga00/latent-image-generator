@@ -344,6 +344,7 @@ button {
 .bubble {
   align-self: flex-end;
   max-width: min(100%, 460px);
+  overflow-wrap: anywhere;
   margin: 0;
   padding: 11px 17px;
   border-radius: 21px;
@@ -542,7 +543,8 @@ button {
  * The wait: a dot field that fills, the way a sketch resolves
  * ------------------------------------------------------------------ */
 .matrix-block {
-  align-self: flex-start;
+  /* full width so the grid can measure the space it actually has */
+  align-self: stretch;
   margin: auto 0;
 }
 
@@ -1291,9 +1293,8 @@ button {
   }
 
   .matrix {
-    --cols: 16;
     --dot: 4px;
-    --gap: 13px;
+    --gap: 11px;
   }
 
   .matrix-caption {
