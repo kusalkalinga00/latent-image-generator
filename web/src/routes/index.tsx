@@ -78,6 +78,85 @@ function waitProgress(elapsed: number, warmed: boolean) {
 const WANTS_CUTOUT =
   /transparen\w*|\bcut\s?-?out\b|no\s+background|remove\s+(the\s+)?background|plain\s+(white|solid)\s+background|isolated\s+on\s+(white|plain)|with\s+alpha\b/i
 
+/**
+ * The cutout control, in two dresses: an icon inside the pill on wide screens, a
+ * labelled chip in its own row on phones, where a third icon beside a short field
+ * was both crowded and indistinguishable from the shape control next to it.
+ */
+function CutoutControl({
+  on,
+  chip,
+  disabled,
+  title,
+  onToggle,
+}: {
+  on: boolean
+  chip: boolean
+  disabled: boolean
+  title: string
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className={`${chip ? 'chip-toggle' : 'icon-toggle'}${on ? ' is-on' : ''}`}
+      onClick={onToggle}
+      aria-pressed={on}
+      aria-label="Transparent background"
+      title={title}
+      disabled={disabled}
+    >
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect
+          x="3.6"
+          y="3.6"
+          width="16.8"
+          height="16.8"
+          rx="3.4"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+        <path d="M6.2 6.2h5.8v5.8H6.2zM12 12h5.8v5.8H12z" fill="currentColor" />
+      </svg>
+      {chip && <span>Cutout</span>}
+    </button>
+  )
+}
+
+function ShapeControl({
+  value,
+  onChange,
+}: {
+  value: Aspect
+  onChange: (next: Aspect) => void
+}) {
+  return (
+    <label className="shape">
+      <span className="sr-only">Image shape</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as Aspect)}
+        aria-label="Image shape"
+      >
+        {(Object.keys(ASPECT_LABELS) as Aspect[]).map((option) => (
+          <option key={option} value={option}>
+            {ASPECT_LABELS[option]}
+          </option>
+        ))}
+      </select>
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        aria-hidden="true"
+      >
+        <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </label>
+  )
+}
+
 const EXAMPLES = [
   'Night with warm street lights',
   'Watercolour painting',
@@ -285,13 +364,35 @@ function App() {
     return () => clearInterval(id)
   }, [status])
 
+  // A narrow pill cannot hold the long placeholder without wrapping it into the
+  // textarea's own height, so phones get the short one. Declared before the
+  // measuring effect because that effect depends on it.
+  const [narrow, setNarrow] = useState(false)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 560px)')
+    const sync = () => setNarrow(mq.matches)
+    sync()
+    mq.addEventListener('change', sync)
+    return () => mq.removeEventListener('change', sync)
+  }, [])
+
   // Grow the prompt with its content, up to the cap in CSS.
+  //
+  // Also re-run on resize: the height was measured against the old width, and on a
+  // phone the width changes when the keyboard opens or the device turns.
   useEffect(() => {
     const el = promptRef.current
     if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(132, el.scrollHeight)}px`
-  }, [prompt])
+    const fit = () => {
+      el.style.height = 'auto'
+      el.style.height = `${Math.min(132, el.scrollHeight)}px`
+    }
+    fit()
+    window.addEventListener('resize', fit)
+    // the placeholder changed, so the box it needs changed too
+    void document.fonts.ready.then(fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [prompt, narrow])
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -528,6 +629,13 @@ function App() {
   const preview = attachments[0]?.previewUrl ?? ''
   const wantedCutout = WANTS_CUTOUT.test(prompt)
   const transparent = cutoutOverride ?? wantedCutout
+  const cutoutTitle = transparent
+    ? cutoutOverride === null
+      ? 'Your prompt asks for transparency, so the background will be cut out. Click to keep it.'
+      : 'Background will be cut out (PNG with alpha). Click to keep it.'
+    : wantedCutout
+      ? 'Turned off for this prompt, though it asks for transparency. Click to cut it out.'
+      : 'Cut the background out of the result'
   const running = status === 'running'
   const full = attachments.length >= MAX_IMAGES
   const done = status === 'done' && Boolean(resultUrl)
@@ -624,7 +732,11 @@ function App() {
           </div>
         ) : (
           <section className="empty">
-            <h1>Describe an image, or drop a photo</h1>
+            <h1>
+              {narrow
+                ? 'Describe an image, or add a photo'
+                : 'Describe an image, or drop a photo'}
+            </h1>
             <p>
               With a photo, your words change it. Without one, they make
               something new. Nothing is stored either way.
@@ -730,6 +842,21 @@ function App() {
           </div>
         )}
 
+        {narrow && (
+          <div className="composer-tools">
+            {attachments.length === 0 && !running && (
+              <ShapeControl value={aspect} onChange={setAspect} />
+            )}
+            <CutoutControl
+              chip
+              on={transparent}
+              disabled={running}
+              title={cutoutTitle}
+              onToggle={() => setCutoutOverride(!transparent)}
+            />
+          </div>
+        )}
+
         <form
           className="composer"
           onSubmit={(event) => {
@@ -762,7 +889,9 @@ function App() {
             placeholder={
               attachments.length > 0
                 ? 'Describe the change…'
-                : 'Describe the image you want…'
+                : narrow
+                  ? 'Describe an image…'
+                  : 'Describe the image you want…'
             }
             className="field"
             aria-label={
@@ -773,68 +902,18 @@ function App() {
             readOnly={running}
           />
 
-          <button
-            type="button"
-            className={`icon-toggle${transparent ? ' is-on' : ''}`}
-            onClick={() => setCutoutOverride(!transparent)}
-            aria-pressed={transparent}
-            aria-label="Transparent background"
-            title={
-              transparent
-                ? cutoutOverride === null
-                  ? 'Your prompt asks for transparency, so the background will be cut out. Click to keep it.'
-                  : 'Background will be cut out (PNG with alpha). Click to keep it.'
-                : wantedCutout
-                  ? 'Turned off for this prompt, though it asks for transparency. Click to cut it out.'
-                  : 'Cut the background out of the result'
-            }
-            disabled={running}
-          >
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <rect
-                x="3.6"
-                y="3.6"
-                width="16.8"
-                height="16.8"
-                rx="3.4"
-                stroke="currentColor"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M6.2 6.2h5.8v5.8H6.2zM12 12h5.8v5.8H12z"
-                fill="currentColor"
-              />
-            </svg>
-          </button>
+          {!narrow && (
+            <CutoutControl
+              chip={false}
+              on={transparent}
+              disabled={running}
+              title={cutoutTitle}
+              onToggle={() => setCutoutOverride(!transparent)}
+            />
+          )}
 
-          {attachments.length === 0 && !running && (
-            <label className="shape">
-              <span className="sr-only">Image shape</span>
-              <select
-                value={aspect}
-                onChange={(e) => setAspect(e.target.value as Aspect)}
-                aria-label="Image shape"
-              >
-                {(Object.keys(ASPECT_LABELS) as Aspect[]).map((value) => (
-                  <option key={value} value={value}>
-                    {ASPECT_LABELS[value]}
-                  </option>
-                ))}
-              </select>
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                aria-hidden="true"
-              >
-                <path
-                  d="M6 9l6 6 6-6"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </label>
+          {!narrow && attachments.length === 0 && !running && (
+            <ShapeControl value={aspect} onChange={setAspect} />
           )}
 
           {running ? (

@@ -517,6 +517,7 @@ button {
 
 .empty h1 {
   margin: 0;
+  text-wrap: balance;
   font-size: 30px;
   font-weight: 450;
   letter-spacing: -0.025em;
@@ -524,6 +525,7 @@ button {
 
 .empty p {
   margin: 0;
+  text-wrap: pretty;
   max-width: 34ch;
   color: var(--ink-3);
   font-size: 13.5px;
@@ -775,9 +777,9 @@ button {
 }
 
 .field {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   display: block;
-  width: 100%;
+  min-width: 0;
   min-height: 38px;
   max-height: 132px;
   padding: 9px 4px;
@@ -793,6 +795,47 @@ button {
 
 .field::placeholder {
   color: var(--ink-3);
+}
+
+/* Secondary composer controls sit in the pill on wide screens and in this row on
+ * phones, where three icons beside a short field left no room for the text. */
+.composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: min(100%, var(--column));
+}
+
+.chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 13px 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip-toggle:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.chip-toggle.is-on {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--line));
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  color: var(--ink);
+}
+
+.chip-toggle svg {
+  width: 15px;
+  height: 15px;
 }
 
 /* transparency toggle inside the pill */
@@ -887,13 +930,18 @@ button {
   color: var(--ink);
 }
 
-.shape svg {
+.shape > svg {
   position: absolute;
   right: 8px;
   width: 12px;
   height: 12px;
   pointer-events: none;
   opacity: 0.7;
+}
+
+/* Shown only where the pill has no room for the word "Square". */
+.shape .glyph {
+  display: none;
 }
 
 .only-pointer {
@@ -1188,5 +1236,67 @@ button {
     min-width: 70px;
     height: 34px;
     font-size: 13px;
+  }
+}
+
+/* ------------------------------------------------------------------
+ * Phones
+ *
+ * At 360px the pill had five things competing for the row and the text
+ * lost: the field was squeezed to 115px, the placeholder wrapped to three
+ * lines, and the textarea grew to fit its own placeholder instead of the
+ * prompt. So below 560px the shape stops using a word and becomes a glyph,
+ * and everything gets tighter.
+ * ------------------------------------------------------------------ */
+@media (max-width: 560px) {
+  .composer {
+    gap: 6px;
+    padding: 5px 5px 5px 7px;
+    border-radius: 26px;
+  }
+
+  .attach,
+  .send {
+    width: 36px;
+    height: 36px;
+  }
+
+  .field {
+    min-height: 40px;
+    padding: 9px 2px;
+  }
+
+  .icon-toggle {
+    width: 28px;
+    height: 28px;
+  }
+
+  .shape select {
+    height: 34px;
+    padding: 0 26px 0 13px;
+    font-size: 12px;
+  }
+
+  .shape > svg {
+    right: 9px;
+    width: 12px;
+    height: 12px;
+  }
+
+  .dock {
+    padding: 6px 10px calc(12px + env(safe-area-inset-bottom));
+    gap: 10px;
+  }
+
+  /* the strip starts where the composer starts, instead of floating centred */
+  .thumbs {
+    align-self: stretch;
+    justify-content: flex-start;
+  }
+
+  .disclaimer {
+    font-size: 10.5px;
+    line-height: 1.5;
+    padding: 0 6px;
   }
 }
