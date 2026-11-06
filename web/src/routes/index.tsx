@@ -249,6 +249,26 @@ function ShapeGlyph({ aspect }: { aspect: Aspect }) {
   )
 }
 
+/**
+ * A data: URL as a File, decoded synchronously.
+ *
+ * `navigator.share()` has to be called while the tap gesture is still live, so the
+ * base64 cannot be decoded through `fetch(dataUrl)` — that await loses the gesture
+ * on iOS and the sheet never opens.
+ */
+function dataUrlToFile(dataUrl: string, name: string): File | null {
+  const comma = dataUrl.indexOf(',')
+  if (comma === -1 || !dataUrl.slice(0, comma).includes('base64')) return null
+  try {
+    const binary = atob(dataUrl.slice(comma + 1))
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+    return new File([bytes], name, { type: 'image/png' })
+  } catch {
+    return null
+  }
+}
+
 const EXAMPLES = [
   'Night with warm street lights',
   'Watercolour painting',
@@ -767,10 +787,45 @@ function App() {
 
   const download = () => {
     if (!resultUrl) return
+    const name = `${resultAlpha ? 'cutout' : 'edited'}-${Date.now()}.png`
+
+    // iOS Safari ignores `download` on a data: URL. The click does nothing, so the
+    // toast used to be the only thing that happened. The share sheet is the only
+    // route from a web page to Photos, and iOS only opens it from inside the tap
+    // gesture — hence the synchronous decode, before any await.
+    const file = dataUrlToFile(resultUrl, name)
+
+    if (
+      file &&
+      typeof navigator.canShare === 'function' &&
+      navigator.canShare({ files: [file] })
+    ) {
+      navigator
+        .share({ files: [file] })
+        .then(() =>
+          pushToast(
+            'success',
+            // Photos flattens alpha onto a background, so say which door keeps it.
+            resultAlpha
+              ? 'Saved. Use Save to Files to keep the transparency.'
+              : 'Saved to your device.',
+          ),
+        )
+        .catch((error: unknown) => {
+          // Cancelling the sheet is not a failure worth shouting about.
+          if (error instanceof Error && error.name === 'AbortError') return
+          pushToast('error', 'Could not open the share sheet.')
+        })
+      return
+    }
+
     const a = document.createElement('a')
     a.href = resultUrl
-    a.download = `${resultAlpha ? 'cutout' : 'edited'}-${Date.now()}.png`
+    a.download = name
+    a.rel = 'noopener'
+    document.body.appendChild(a)
     a.click()
+    a.remove()
     pushToast('success', 'Download started.')
   }
 
