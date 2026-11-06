@@ -73,6 +73,12 @@ Every picture here is the real app on the live URL — no mockups.
 | Done, on a phone | The same, with download / edit / start-over as translucent icon buttons in the image's top-left corner instead of a row beneath it |
 | Phone locked mid-render, then unlocked | The waiting state, then the render it was already owed — collected, not re-run |
 
+Attachments are re-encoded in the browser before they are sent: downscaled to 1536px, then
+encoded as WebP (alpha preserved) with the encoded size held under 3.4MB, because Vercel rejects a
+request body over 4.5MB and base64 adds a third to whatever the image weighs. Without that, editing
+a generated result fails with a 413 that looks like a model error — see
+[troubleshooting](#troubleshooting).
+
 The instruction is echoed as a chat bubble above the result, because the thing on screen is the
 answer to the sentence you typed — and after a cold start of 40-plus seconds, being able to see
 what you asked for is what tells you the wait was worth it.
@@ -785,6 +791,12 @@ The project already has `web` as its Root Directory; run it from the repo root.
 
 **A 401 from the web app** — the proxy token is wrong, not the model. The server logs Modal's
 status and body so the two are distinguishable.
+
+**"The edit did not finish" and Modal's logs show no POST at all** — the request was rejected
+before the server function ran. Vercel caps a serverless request body at 4.5MB, and base64
+inflates an image by 4/3; a 3.7MB PNG is 4.9MB on the wire. `prepareImage()` now encodes WebP and
+enforces `MAX_ATTACHMENT_CHARS` (3.4M) before sending, so this shows up as a 413 in the browser's
+network panel rather than a model error if it ever returns.
 
 **`Could not reach the editor` after the phone was locked** — the client lost the reply, not the
 render. It now polls `result?job_id=` for about a minute and shows the image if it lands; if the
