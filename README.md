@@ -3,11 +3,6 @@
 **A personal project, built to learn two things by doing them:** how a 7B image model is actually
 deployed and paid for, and what separates an AI-powered *application* from a demo with a text box.
 
-It is not a startup and there is no roadmap — it is a studio I use, and the notes below are what
-the building of it taught me. The name is new; the repository, the Modal app and the Vercel project
-still say `image-editor`, and that is deliberate — renaming the Modal app renames its endpoints,
-which would mean rotating three environment variables for a change nobody sees.
-
 <p align="center">
   <img src="web/public/og.png" alt="Latent — describe it, or drop a photo" width="720">
 </p>
