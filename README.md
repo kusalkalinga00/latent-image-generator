@@ -83,15 +83,21 @@ The instruction is echoed as a chat bubble above the result, because the thing o
 answer to the sentence you typed — and after a cold start of 40-plus seconds, being able to see
 what you asked for is what tells you the wait was worth it.
 
-Transparency is decided by the **prompt**, not by a switch. A prompt that says "transparent
-background" — or cut-out, no background, remove the background, isolated on white, with alpha —
-turns it on by itself, and the footer says so before you send. The checkerboard icon in
-the composer still overrides that for the session, and reloading returns to auto, so no stale
-choice can quietly defeat a later prompt.
+Transparency is decided by the **prompt** first. A prompt that asks for a transparent
+*background* — or `rgba`, `alpha channel`, `with alpha`, cut-out, no background, remove the
+background, isolated on white — turns it on by itself, and the footer says so before you send. The
+checkerboard icon in the composer overrides that in either direction for the session, and
+reloading returns to auto, so no stale choice can quietly defeat a later prompt.
 
-It applies to both jobs: a generated icon or a cut-out subject from a photo. When the result
-really carries an alpha channel the stage draws a checkerboard behind it and the result row is
-marked `transp.`, so transparency is visible rather than merely claimed.
+The matcher is narrow on purpose: it wants phrases about the output file, not the word
+"transparent" anywhere. That distinction was cosmetic while transparency was a post-step — a
+false positive produced a bad matte from a normal render — but it is a generation parameter now,
+so matching "a transparent glass of water" would spend the render making a cutout of a glass
+instead of the photograph that was asked for.
+
+It applies to both jobs: a generated icon, or the subject of a photo. When the result really
+carries an alpha channel the stage draws a checkerboard behind it and the result row is marked
+`transp.`, so transparency is visible rather than merely claimed.
 
 ---
 
@@ -233,7 +239,7 @@ a reply is lost, the client asks for that job by id until it turns up or the bud
 2. **The browser prepares the payload.** The photo is downscaled to a 1536 px long edge in a
    canvas before it leaves — a 12 MP phone photo is a slow upload and a larger tensor for no
    visible gain. The prompt is checked for length, and the transparency intent is read from it
-   (see [transparency](#transparency-is-post-processing-not-generation)).
+   (see [transparency](#transparency-is-generation-not-post-processing)).
 3. **It calls a server function, not Modal.** `lib/edit.ts` runs on Vercel, reads the endpoint URL
    and proxy token from `process.env` *inside* the handler, and makes the outbound request with a
    `Bearer` header. This is the whole point of the indirection: a credential in the browser bundle

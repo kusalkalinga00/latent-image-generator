@@ -85,21 +85,30 @@ function waitProgress(elapsed: number, warmed: boolean) {
 // Short enough to scan as chips; the point is to show the range of edits, not to
 // write the prompt for the user.
 /**
- * Does the prompt ask for a background-free image?
+ * Does the prompt ask for an image with no background?
  *
- * Deliberately narrow: these are phrases about the *output*, not about what is in
- * the picture. "a transparent glass" would match too, and cutting the background
- * out of that is still the sane reading.
+ * These are phrases about the *output* file, not about anything inside the
+ * picture, and the distinction is load-bearing now that transparency is a
+ * generation parameter rather than a post-step: a match here rewrites the request
+ * so the model spends its four steps drawing an alpha channel. A bare
+ * "transparent" used to be a harmless false positive — it produced a cutout from
+ * an otherwise normal render — but "a transparent glass of water" would now come
+ * back as a cutout of a glass instead of the photograph the user asked for. So
+ * "transparent" only counts when it is about the background.
  */
-const WANTS_CUTOUT =
-  /transparen\w*|\bcut\s?-?out\b|no\s+background|remove\s+(the\s+)?background|plain\s+(white|solid)\s+background|isolated\s+on\s+(white|plain)|with\s+alpha\b/i
+const WANTS_TRANSPARENT =
+  /\btransparent\s+(background|bg)\b|\brgba\b|\balpha\s+channel\b|\bwith\s+alpha\b|\bcut\s?-?out\b|\bno\s+background\b|remove\s+(the\s+)?background|\bplain\s+(white|solid)\s+background\b|isolated\s+on\s+(white|plain)/i
 
 /**
- * The cutout control, in two dresses: an icon inside the pill on wide screens, a
- * labelled chip in its own row on phones, where a third icon beside a short field
- * was both crowded and indistinguishable from the shape control next to it.
+ * The transparency control, in two dresses: an icon inside the pill on wide
+ * screens, a labelled chip in its own row on phones, where a third icon beside a
+ * short field was both crowded and indistinguishable from the shape control next
+ * to it.
+ *
+ * It asks the model for an alpha channel rather than cutting anything out, so it
+ * is labelled for what it produces.
  */
-function CutoutControl({
+function TransparentControl({
   on,
   chip,
   disabled,
@@ -134,7 +143,7 @@ function CutoutControl({
         />
         <path d="M6.2 6.2h5.8v5.8H6.2zM12 12h5.8v5.8H12z" fill="currentColor" />
       </svg>
-      {chip && <span>Cutout</span>}
+      {chip && <span>Transparent</span>}
     </button>
   )
 }
@@ -538,11 +547,13 @@ function App() {
   // backend builds, and `resultAlpha` records whether an alpha channel actually
   // came back - the field reports what happened, not what was asked.
   //
-  // Default is "decide from the prompt", because a prompt that says "transparent
-  // background" is asking for exactly this and should not require finding a
-  // 18-pixel icon. A click sets an explicit override for the session; reloading
+  // Default is "decide from the prompt", because a prompt that asks for a
+  // transparent background should not require finding an 18-pixel icon. A click
+  // sets an explicit override for the session, in either direction; reloading
   // returns to auto, so no stale choice can silently defeat a later prompt.
-  const [cutoutOverride, setCutoutOverride] = useState<boolean | null>(null)
+  const [transparentOverride, setTransparentOverride] = useState<
+    boolean | null
+  >(null)
   const [resultAlpha, setResultAlpha] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
@@ -960,7 +971,7 @@ function App() {
 
   const download = () => {
     if (!resultUrl) return
-    const name = `${resultAlpha ? 'cutout' : 'edited'}-${Date.now()}.png`
+    const name = `${resultAlpha ? 'transparent' : 'edited'}-${Date.now()}.png`
 
     // iOS Safari ignores `download` on a data: URL. The click does nothing, so the
     // toast used to be the only thing that happened. The share sheet is the only
@@ -1007,15 +1018,15 @@ function App() {
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
-  const wantedCutout = WANTS_CUTOUT.test(prompt)
-  const transparent = cutoutOverride ?? wantedCutout
-  const cutoutTitle = transparent
-    ? cutoutOverride === null
-      ? 'Your prompt asks for transparency, so the background will be cut out. Click to keep it.'
-      : 'Background will be cut out (PNG with alpha). Click to keep it.'
-    : wantedCutout
-      ? 'Turned off for this prompt, though it asks for transparency. Click to cut it out.'
-      : 'Cut the background out of the result'
+  const promptWantsTransparent = WANTS_TRANSPARENT.test(prompt)
+  const transparent = transparentOverride ?? promptWantsTransparent
+  const transparentTitle = transparent
+    ? transparentOverride === null
+      ? 'Your prompt asks for a transparent background, so the result will have one. Click to keep the background.'
+      : 'Transparent background (PNG with alpha). Click to keep the background.'
+    : promptWantsTransparent
+      ? 'Turned off for this prompt, though it asks for a transparent background. Click to make it transparent.'
+      : 'Make the background transparent'
   const running = status === 'running'
   const full = attachments.length >= MAX_IMAGES
   const done = status === 'done' && Boolean(resultUrl)
@@ -1289,12 +1300,12 @@ function App() {
             {attachments.length === 0 && !running && (
               <ShapeControl value={aspect} onChange={setAspect} />
             )}
-            <CutoutControl
+            <TransparentControl
               chip
               on={transparent}
               disabled={running}
-              title={cutoutTitle}
-              onToggle={() => setCutoutOverride(!transparent)}
+              title={transparentTitle}
+              onToggle={() => setTransparentOverride(!transparent)}
             />
           </div>
         )}
@@ -1345,12 +1356,12 @@ function App() {
           />
 
           {!narrow && (
-            <CutoutControl
+            <TransparentControl
               chip={false}
               on={transparent}
               disabled={running}
-              title={cutoutTitle}
-              onToggle={() => setCutoutOverride(!transparent)}
+              title={transparentTitle}
+              onToggle={() => setTransparentOverride(!transparent)}
             />
           )}
 
@@ -1405,7 +1416,7 @@ function App() {
         <p className="disclaimer">
           Qwen-Image ·{narrow ? ' ' : ' on-demand GPU · '}
           <b>images are not stored</b>
-          {transparent && ' · cutout'}
+          {transparent && ' · transparent'}
           <span className="only-pointer"> · ⌘↵ to send</span>
         </p>
       </div>
