@@ -23,6 +23,8 @@ export interface EditInput {
   steps: number
   seed: number
   transparent?: boolean
+  /** Client-chosen id, so the render can be collected if the reply is lost. */
+  jobId?: string
 }
 
 export interface GenerateInput {
@@ -31,12 +33,19 @@ export interface GenerateInput {
   seed: number
   aspect: Aspect
   transparent?: boolean
+  jobId?: string
 }
 
 export interface EditOutput {
   ok: boolean
   mode?: 'edit' | 'generate'
   model?: string
+  /** The render is still running: ask again rather than starting a new one. */
+  pending?: boolean
+  /** The render finished but has aged out of the result store. */
+  expired?: boolean
+  /** The request failed in transit — the render may still have completed. */
+  network?: boolean
   /** True when the backend returned a cut-out with a real alpha channel. */
   transparent?: boolean
   imageBase64?: string
@@ -73,10 +82,25 @@ interface ModalPayload {
   seed: number
   aspect?: string
   transparent?: boolean
+  /** Chosen by the client before sending, so a lost reply can be collected. */
+  job_id?: string
 }
 
-function failed(error: string): EditOutput {
-  return { ok: false, error }
+function failed(error: string, extra: Partial<EditOutput> = {}): EditOutput {
+  return { ok: false, error, ...extra }
+}
+
+/**
+ * Where finished renders are collected from.
+ *
+ * Modal derives a web endpoint's URL from the function name, so the result
+ * endpoint sits beside the api one; allow an override for a renamed app.
+ */
+function resultUrl(apiUrl: string): string {
+  const override = process.env.IMAGE_EDITOR_RESULT_URL
+  if (override) return override
+  const derived = apiUrl.replace(/-api(?=\.|$)/, '-result')
+  return derived === apiUrl ? '' : derived
 }
 
 function modelMessage(value: unknown) {
@@ -180,7 +204,11 @@ async function callModal(
     }
   } catch (error) {
     console.error('Image editor request failed:', error)
-    return failed('Could not reach the editor. Try again in a moment.')
+    // A transport failure is not a model failure: the render may well have
+    // finished, so the caller can try to collect it by job id.
+    return failed('Could not reach the editor. Try again in a moment.', {
+      network: true,
+    })
   }
 }
 
@@ -219,6 +247,7 @@ export const editImage = createServerFn({ method: 'POST' })
         steps: data.steps,
         seed: data.seed,
         transparent: data.transparent === true,
+        job_id: data.jobId,
       },
       'edit',
     )
@@ -251,7 +280,82 @@ export const generateImage = createServerFn({ method: 'POST' })
         seed: data.seed,
         aspect: data.aspect,
         transparent: data.transparent === true,
+        job_id: data.jobId,
       },
       'generate',
     )
+  })
+
+/**
+ * Collect a render by job id.
+ *
+ * Called when the original request's reply never arrived — the usual cause is a
+ * phone locking mid-render, which tears the connection down while the GPU keeps
+ * working. `pending` means "not finished, keep waiting"; anything else is either
+ * the image or a reason there is none.
+ */
+export const collectResult = createServerFn({ method: 'POST' })
+  .validator((data: { jobId: string }) => data)
+  .handler(async ({ data }): Promise<EditOutput> => {
+    const apiUrl = process.env.IMAGE_EDITOR_API_URL
+    const tokenId = process.env.MODAL_PROXY_TOKEN_ID
+    const tokenSecret = process.env.MODAL_PROXY_TOKEN_SECRET
+    const url = apiUrl ? resultUrl(apiUrl) : ''
+
+    if (!url || !tokenId || !tokenSecret) {
+      return failed('The editor is not available right now.')
+    }
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(data.jobId)) {
+      return failed('That result id is not valid.')
+    }
+
+    try {
+      const response = await fetch(
+        `${url}?job_id=${encodeURIComponent(data.jobId)}`,
+        { headers: { Authorization: `Bearer ${tokenId}.${tokenSecret}` } },
+      )
+      if (!response.ok) {
+        return failed('Could not look that result up.', { network: true })
+      }
+
+      const body = (await response.json()) as {
+        ok?: boolean
+        pending?: boolean
+        expired?: boolean
+        error?: unknown
+        mode?: 'edit' | 'generate'
+        model?: string
+        transparent?: boolean
+        image_b64?: string
+        seconds?: number
+        steps?: number
+        size?: [number, number]
+      }
+
+      if (body.pending) return { ok: false, pending: true }
+      if (body.expired) {
+        return failed('That render expired before it could be collected.', {
+          expired: true,
+        })
+      }
+      if (!body.ok || !body.image_b64) {
+        return failed(modelMessage(body.error) || 'That result is unavailable.')
+      }
+
+      return {
+        ok: true,
+        mode: body.mode,
+        model: typeof body.model === 'string' ? body.model : undefined,
+        transparent: body.transparent === true,
+        imageBase64: body.image_b64,
+        seconds: body.seconds,
+        steps: body.steps,
+        size: body.size,
+      }
+    } catch (error) {
+      console.error('Image editor result lookup failed:', error)
+      return failed('Could not reach the editor. Try again in a moment.', {
+        network: true,
+      })
+    }
   })

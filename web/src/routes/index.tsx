@@ -8,8 +8,13 @@ import {
 } from 'react'
 import type { CSSProperties } from 'react'
 import { refreshCredit } from '#/lib/credit-store'
-import type { Aspect } from '#/lib/edit'
-import { ASPECT_LABELS, editImage, generateImage } from '#/lib/edit'
+import {
+  ASPECT_LABELS,
+  collectResult,
+  editImage,
+  generateImage,
+} from '#/lib/edit'
+import type { Aspect, EditOutput } from '#/lib/edit'
 import { pushToast } from '#/lib/toast'
 
 export const Route = createFileRoute('/')({ component: App })
@@ -221,6 +226,16 @@ function ShapeControl({
       )}
     </div>
   )
+}
+
+/** localStorage key for a render that is still owed to this device. */
+const PENDING_KEY = 'image-editor:pending'
+
+interface PendingJob {
+  id: string
+  prompt: string
+  mode: 'edit' | 'generate'
+  at: number
 }
 
 /** The aspect, drawn to scale — a word says "Wide", this shows how wide. */
@@ -666,6 +681,116 @@ function App() {
     setStatus('idle')
   }
 
+  /**
+   * The job id is chosen here, before anything is sent, and kept in
+   * localStorage. A phone that locks mid-render loses the reply but not the
+   * render: this is what lets the page ask for it again on the way back.
+   */
+  const rememberJob = useCallback((job: PendingJob | null) => {
+    try {
+      if (job) localStorage.setItem(PENDING_KEY, JSON.stringify(job))
+      else localStorage.removeItem(PENDING_KEY)
+    } catch {
+      // Private mode, quota, whatever: recovery is a nicety, not a requirement.
+    }
+  }, [])
+
+  const showResult = useCallback((out: EditOutput, mode: Mode) => {
+    if (!out.imageBase64) return
+    warmed.current = true
+    setResultUrl(`data:image/png;base64,${out.imageBase64}`)
+    setResultMeta(`${out.seconds}s · ${out.steps} steps`)
+    setResultModel(out.model ?? '')
+    setResultAlpha(out.transparent === true)
+    setStatus('done')
+    void refreshCredit()
+    if (out.seconds) {
+      pushToast(
+        'success',
+        `${mode === 'generate' ? 'Generated' : 'Edit ready'} in ${out.seconds}s.`,
+      )
+    }
+  }, [])
+
+  /**
+   * Ask the backend for a render whose reply never arrived.
+   *
+   * Polls rather than retrying the render: a second request would bill a second
+   * GPU run for work that already happened.
+   */
+  const collect = useCallback(
+    async (jobId: string, mode: Mode, runAtStart: number) => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        // The lookup itself travels the same broken path, and a server function
+        // rejects in the browser rather than returning an error, so this call
+        // needs its own guard: one dead attempt is not a verdict.
+        let out: EditOutput = { ok: false, network: true }
+        try {
+          out = await collectResult({ data: { jobId } })
+        } catch {
+          out = { ok: false, network: true }
+        }
+        if (runId.current !== runAtStart) return true
+
+        if (out.ok && out.imageBase64) {
+          showResult(out, mode)
+          rememberJob(null)
+          pushToast('info', 'Picked up the render from before.')
+          return true
+        }
+        if (!out.pending && !out.network) {
+          rememberJob(null)
+          return false
+        }
+        await new Promise((resolve) => setTimeout(resolve, 3000))
+      }
+      return false
+    },
+    [rememberJob, showResult],
+  )
+
+  // Coming back from a lock, a reload, or a tab that was killed: the render this
+  // device asked for may already be finished and waiting to be collected.
+  const recoveredOnce = useRef(false)
+  useEffect(() => {
+    if (recoveredOnce.current) return
+    recoveredOnce.current = true
+
+    let raw: string | null = null
+    try {
+      raw = localStorage.getItem(PENDING_KEY)
+    } catch {
+      return
+    }
+    if (!raw) return
+
+    let job: PendingJob
+    try {
+      job = JSON.parse(raw) as PendingJob
+    } catch {
+      rememberJob(null)
+      return
+    }
+    if (!job.id || Date.now() - job.at > 30 * 60 * 1000) {
+      rememberJob(null)
+      return
+    }
+
+    void (async () => {
+      const pendingRun = ++runId.current
+      setPrompt(job.prompt)
+      setLastPrompt(job.prompt)
+      setLastMode(job.mode)
+      setErrorText('')
+      setStatus('running')
+      const found = await collect(job.id, job.mode, pendingRun)
+      if (!found && runId.current === pendingRun) {
+        setStatus('idle')
+        pushToast('info', 'That render is no longer available.')
+      }
+    })()
+  }, [collect, rememberJob])
+
   const run = async () => {
     if (!prompt.trim()) {
       pushToast('error', 'Describe what you want.')
@@ -676,6 +801,8 @@ function App() {
     const id = ++runId.current
     const instruction = prompt.trim()
     const mode = attachments.length > 0 ? 'edit' : 'generate'
+    const jobId = crypto.randomUUID()
+    rememberJob({ id: jobId, prompt: instruction, mode, at: Date.now() })
     setElapsed(0)
     setErrorText('')
     setLastPrompt(instruction)
@@ -692,6 +819,7 @@ function App() {
                 steps: STEPS,
                 seed,
                 transparent,
+                jobId,
               },
             })
           : await generateImage({
@@ -701,12 +829,17 @@ function App() {
                 seed,
                 aspect,
                 transparent,
+                jobId,
               },
             })
 
       if (runId.current !== id) return
 
       if (!out.ok || !out.imageBase64) {
+        // A lost connection is not a lost render: try to collect it before
+        // telling the user anything went wrong.
+        if (out.network && (await collect(jobId, mode, id))) return
+
         const message =
           out.error ?? 'The edit did not finish. Try again in a moment.'
         pushToast('error', message)
@@ -715,23 +848,14 @@ function App() {
         return
       }
 
-      warmed.current = true
-      setResultUrl(`data:image/png;base64,${out.imageBase64}`)
-      setResultMeta(`${out.seconds}s · ${out.steps} steps`)
-      setResultModel(out.model ?? '')
-      setResultAlpha(out.transparent === true)
-      setStatus('done')
-      pushToast(
-        'success',
-        out.seconds
-          ? `${mode === 'generate' ? 'Generated' : 'Edit ready'} in ${out.seconds}s.`
-          : 'Ready.',
-      )
-      // The credit chip is the only place remaining budget is shown, and this is
-      // the only moment it moves.
-      void refreshCredit()
+      rememberJob(null)
+      showResult(out, mode)
     } catch (err) {
       if (runId.current !== id) return
+      // The fetch died, but that says nothing about the render: the server may
+      // have finished it and stored it under the id we sent. Ask before failing.
+      if (await collect(jobId, mode, id)) return
+
       const message =
         err instanceof Error ? err.message : 'The edit did not finish.'
       const friendly = /fetch|network|load failed/i.test(message)
@@ -754,6 +878,8 @@ function App() {
 
   const clearEditor = () => {
     runId.current += 1
+    // Starting over also gives up the claim on any render still in flight.
+    rememberJob(null)
     setPrompt('')
     setResultUrl('')
     setResultMeta('')

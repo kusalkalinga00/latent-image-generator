@@ -44,7 +44,11 @@ checkpoint initialization is entirely storage-bound.
 from __future__ import annotations
 
 import io
+import json
 import math
+import os
+import re
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -54,6 +58,18 @@ APP_NAME = "image-editor"
 MODEL_ID = "Qwen/Qwen-Image-Edit-2511"
 VOLUME_NAME = "image-editor-weights"
 MODEL_CACHE = "/models/hf"
+
+# Finished renders, kept just long enough for a client to come back for them.
+#
+# The failure this exists for: a phone locks while a render is in flight. iOS
+# tears the connection down on suspend, so the browser's fetch rejects and the
+# user gets a network error - while the GPU, which nobody told, finishes the job
+# and bills for it. The result is written here under the job id the client chose
+# before it sent anything, so the client can ask again on resume and collect the
+# render it already paid for, instead of paying twice.
+RESULTS_VOLUME_NAME = "image-editor-results"
+RESULTS_PATH = "/results"
+RESULTS_TTL_S = 45 * 60
 
 # The 4-step distilled LoRA: Apache-2.0, 0.85 GB, published for 2511 specifically
 # (not the 2509 or text-to-image variants, which are different repos).
@@ -711,7 +727,43 @@ def credit_snapshot() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-@app.function(image=api_image, timeout=1200)
+RESULTS = modal.Volume.from_name(RESULTS_VOLUME_NAME, create_if_missing=True)
+
+
+def _jobs_path(job_id: str) -> str:
+    # The id arrives from a client, so it is never trusted as a path segment.
+    return os.path.join(RESULTS_PATH, re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:64] + ".json")
+
+
+def _store_result(job_id: str, body: dict[str, Any]) -> None:
+    """Keep a finished render for a client that lost its connection.
+
+    Best-effort on purpose: a failure here must not turn a successful render into
+    an error response. The worst case is the old behaviour, not a worse one.
+    """
+    if not job_id:
+        return
+    try:
+        _prune_results()
+        with open(_jobs_path(job_id), "w", encoding="utf-8") as handle:
+            json.dump({**body, "at": time.time()}, handle)
+        RESULTS.commit()
+    except Exception as exc:
+        print(f"[image-editor] could not store result: {type(exc).__name__}: {exc}")
+
+
+def _prune_results() -> None:
+    cutoff = time.time() - RESULTS_TTL_S
+    for name in os.listdir(RESULTS_PATH):
+        path = os.path.join(RESULTS_PATH, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+@app.function(image=api_image, volumes={"/models": weights, RESULTS_PATH: RESULTS}, timeout=1200)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def api(payload: dict[str, Any]) -> dict[str, Any]:
     """Edit endpoint.
@@ -780,7 +832,7 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
             print(f"[image-editor] cutout failed: {type(exc).__name__}: {exc}")
             transparent = False
 
-    return {
+    body = {
         "ok": True,
         "mode": mode,
         # Which checkpoint actually answered. The client shows this next to the
@@ -795,6 +847,40 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         "steps": out["steps"],
         "size": out["size"],
     }
+
+    # Written before returning, so a client whose connection died mid-flight can
+    # collect this render on resume rather than triggering a second one.
+    _store_result(str(payload.get("job_id") or ""), body)
+    return body
+
+
+@app.function(image=api_image, volumes={RESULTS_PATH: RESULTS}, timeout=60)
+@modal.fastapi_endpoint(method="GET", requires_proxy_auth=True)
+def result(job_id: str = "") -> dict[str, Any]:
+    """Collect a render by job id.
+
+    ``{"ok": true, "pending": true}`` means the render is not finished yet - the
+    client should keep waiting rather than start a second one. ``status: 410``
+    -style expiry is expressed as ``expired`` so the client can say something
+    honest instead of retrying into a result that will never arrive.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:64]
+    if not safe:
+        return {"ok": False, "error": "job_id is required"}
+
+    try:
+        RESULTS.reload()
+        path = _jobs_path(safe)
+        if not os.path.exists(path):
+            return {"ok": True, "pending": True}
+        with open(path, encoding="utf-8") as handle:
+            body = json.load(handle)
+        if time.time() - float(body.pop("at", 0)) > RESULTS_TTL_S:
+            return {"ok": False, "expired": True, "error": "This result has expired."}
+        return {**body, "ok": True}
+    except Exception as exc:
+        print(f"[image-editor] result lookup failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "error": "Could not look that result up."}
 
 
 @app.function(image=api_image, timeout=60)
