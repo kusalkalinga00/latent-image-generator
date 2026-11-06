@@ -1030,6 +1030,65 @@ function App() {
                       <span className="stage-tag">Original</span>
                     </>
                   ) : null}
+
+                  {/* On phones the actions ride on the picture instead of taking
+                   * three lines of height below it. Transparent, so the image
+                   * stays the subject; they are the only chrome over it. */}
+                  {done && narrow && (
+                    <div className="frame-actions">
+                      <button
+                        type="button"
+                        className="frame-btn"
+                        onClick={download}
+                        aria-label="Download PNG"
+                        title="Download PNG"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                          <path
+                            d="M12 4v10m0 0 4.2-4.2M12 14l-4.2-4.2M5 19h14"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="frame-btn"
+                        onClick={() => void continueFromResult()}
+                        aria-label="Edit this result"
+                        title="Edit this result"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                          <path
+                            d="M4 20h4l9.5-9.5a2.1 2.1 0 0 0-3-3L5 17v3z"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="frame-btn"
+                        onClick={clearEditor}
+                        aria-label="Start over"
+                        title="Start over"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                          <path
+                            d="M4 10a8 8 0 1 1 2.4 5.7M4 4v6h6"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
                 </figure>
 
                 {done && (
@@ -1043,29 +1102,31 @@ function App() {
                       · {resultMeta}
                       {resultAlpha && ' · transp.'}
                     </span>
-                    <span className="acts">
-                      <button
-                        type="button"
-                        className="btn is-primary"
-                        onClick={download}
-                      >
-                        Download PNG
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => void continueFromResult()}
-                      >
-                        Edit this result
-                      </button>
-                      <button
-                        type="button"
-                        className="link-btn"
-                        onClick={clearEditor}
-                      >
-                        Start over
-                      </button>
-                    </span>
+                    {!narrow && (
+                      <span className="acts">
+                        <button
+                          type="button"
+                          className="btn is-primary"
+                          onClick={download}
+                        >
+                          Download PNG
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => void continueFromResult()}
+                        >
+                          Edit this result
+                        </button>
+                        <button
+                          type="button"
+                          className="link-btn"
+                          onClick={clearEditor}
+                        >
+                          Start over
+                        </button>
+                      </span>
+                    )}
                   </div>
                 )}
               </>

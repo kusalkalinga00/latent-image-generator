@@ -849,6 +849,73 @@ button {
   height: 15px;
 }
 
+/* Actions that ride on the result on phones: a small cluster in the corner, so a
+ * finished image does not push the composer down by three lines of buttons. */
+.frame-actions {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 3;
+  display: flex;
+  gap: 8px;
+}
+
+.frame-btn {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgb(255 255 255 / 26%);
+  border-radius: 50%;
+  /* Dark enough for a white glyph to hold on a bright photo — at 38% the icons
+   * vanished into grass and snow, which is most of what this app produces. */
+  background: rgb(0 0 0 / 56%);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 30%);
+  transition:
+    background 140ms var(--ease),
+    transform 140ms var(--ease);
+}
+
+.frame-btn:hover {
+  background: rgb(0 0 0 / 68%);
+}
+
+.frame-btn:active {
+  transform: scale(0.94);
+}
+
+.frame-btn svg {
+  width: 19px;
+  height: 19px;
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 45%));
+}
+
+/* A short window shrinks the picture (it is capped by 100dvh), and three 38px
+ * circles then cover most of it. A container query would be the natural tool, but
+ * `container-type: inline-size` removes the image's contribution to the frame's
+ * width — the frame collapsed to 0px — so the viewport height stands in for it. */
+@media (max-width: 560px) and (max-height: 660px) {
+  .frame-actions {
+    top: 8px;
+    left: 8px;
+    gap: 6px;
+  }
+
+  .frame-btn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .frame-btn svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
 /* transparency toggle inside the pill */
 .icon-toggle {
   display: grid;
