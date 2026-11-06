@@ -42,6 +42,8 @@ Modal Starter credit, which is the constraint that shaped most of the decisions 
 | Running | The prompt as a right-aligned bubble, then a field of dots filling in behind a percentage |
 | Done (edit) | Before/after wipe over the result, model name + seconds + steps underneath |
 | Done (generate) | The generated image tagged `Generated`, same metadata row |
+| Done, on a phone | The same, with download / edit / start-over as translucent icon buttons in the image's top-left corner instead of a row beneath it |
+| Phone locked mid-render, then unlocked | The waiting state, then the render it was already owed — collected, not re-run |
 
 The instruction is echoed as a chat bubble above the result, because the thing on screen is the
 answer to the sentence you typed — and after a cold start of 40-plus seconds, being able to see
@@ -65,16 +67,19 @@ marked `transp.`, so transparency is visible rather than merely claimed.
 flowchart TB
   subgraph BROWSER["Browser — holds no secrets"]
     UI["routes/index.tsx<br/>composer · stage · result"]
+    LS["localStorage<br/>image-editor:pending<br/>the job id, not the image"]
   end
 
   subgraph VERCEL["Vercel · TanStack Start (Node runtime)"]
-    FN["createServerFn<br/>lib/edit.ts"]
-    CR["createServerFn<br/>lib/credit.ts"]
-    ENV["process.env<br/>IMAGE_EDITOR_API_URL<br/>IMAGE_EDITOR_PROXY_TOKEN"]
+    FN["createServerFn<br/>editImage / generateImage"]
+    CO["createServerFn<br/>collectResult"]
+    CR["createServerFn<br/>getCredit"]
+    ENV["process.env<br/>IMAGE_EDITOR_API_URL<br/>MODAL_PROXY_TOKEN_ID<br/>MODAL_PROXY_TOKEN_SECRET"]
   end
 
   subgraph MODAL["Modal · image-editor app"]
-    API["POST api()<br/>route by payload"]
+    API["POST api()<br/>route by payload<br/>store by job id"]
+    RES["GET result?job_id<br/>hand back a finished render"]
     USE["GET usage()<br/>billing summary"]
     subgraph EDITOR["Editor · class"]
       ED["Qwen-Image-Edit-2511<br/>+ 4-step Lightning LoRA<br/>H100 80 GB"]
@@ -85,21 +90,33 @@ flowchart TB
     MAT["matting.py · CPU container<br/>geometric key or u2net"]
   end
 
-  VOL[("Modal Volume<br/>image-editor-weights<br/>2 × ~54 GiB")]
+  VOL[("Volume<br/>image-editor-weights<br/>2 × ~54 GiB")]
+  RVOL[("Volume<br/>image-editor-results<br/>45 minute TTL")]
 
-  UI -->|"prompt + optional photo"| FN
+  UI -->|"prompt + optional photo + job id"| FN
   UI -->|"credit, on load"| CR
+  UI -.->|"writes, before sending"| LS
+  UI -->|"reply lost → ask again"| CO
   FN -.->|"reads"| ENV
+  CO -.->|"reads"| ENV
   CR -.->|"reads"| ENV
   FN ==>|"HTTPS + Bearer"| API
+  CO ==>|"HTTPS + Bearer"| RES
   CR ==>|"HTTPS + Bearer"| USE
   API -->|"image_b64 present → edit"| ED
   API -->|"no image_b64 → generate"| PN
+  API -.->|"writes the finished PNG"| RVOL
+  RES -.->|"reads it back"| RVOL
   ED --> MAT
   PN --> MAT
   ED -.->|"loads weights"| VOL
   PN -.->|"loads weights"| VOL
 ```
+
+Three endpoints, not one, and each earns its place: `api` does the work, `result` hands back
+work that was already done, `usage` reads the bill. The second exists because a phone that locks
+mid-render drops the reply while the GPU keeps going — see
+[when the reply is lost](#when-the-reply-is-lost).
 
 Three consequences of that shape, each deliberate:
 
@@ -111,6 +128,11 @@ credential to every visitor. No CORS config exists because no browser request ev
 **The GPU service serves no UI.** It answers JSON. An earlier version embedded a Gradio app,
 which then needed its own password, its own secret, and its own failure modes; all of it was
 deleted. The UI lives where it is cheap to serve and cheap to change.
+
+**A render is addressable, because a reply can be lost.** Every request carries a job id the
+client chose, and the finished image is stored under it before the response goes out. That costs
+one small write and buys the only sane answer to a phone that locks mid-render: the work is
+already paid for, so it is collectable rather than repeatable.
 
 **Two model containers, not one.** Each checkpoint is a 20 B MMDiT (38.05 GiB) plus a
 Qwen2.5-VL text encoder (15.45 GiB) — 53.7 GiB apiece, download sizes verified against the HF
@@ -130,10 +152,12 @@ sequenceDiagram
   participant F as Vercel function
   participant A as Modal api()
   participant G as GPU container
+  participant R as Results volume
 
   U->>B: prompt, plus a photo if there is one
+  B->>B: pick a job id, remember it in localStorage
   B->>B: validate, downscale to 1536 px long edge
-  B->>F: POST server function
+  B->>F: POST server function, with the job id
   F->>F: read env, attach Bearer token
   F->>A: POST api()
   A->>A: image present ? edit : generate
@@ -145,14 +169,27 @@ sequenceDiagram
   opt transparency was asked for
     A->>A: cut the background out, on CPU
   end
-  A-->>F: ok, mode, model, image_b64, transparent
-  F-->>B: JSON
-  B-->>U: image, model name, seconds
+  A->>R: store the payload under the job id
+  alt the reply gets through
+    A-->>F: ok, mode, model, image_b64, transparent
+    F-->>B: JSON
+    B-->>U: image, model name, seconds
+  else the connection died (device locked, tab killed)
+    F--xB: the reply has nowhere to go
+    B->>F: collectResult(job id)
+    F->>A: GET result?job_id
+    A->>R: read it back
+    A-->>F: the same payload
+    F-->>B: JSON
+    B-->>U: the image that was already paid for
+  end
   Note over G: idle for 60 s, then it goes away
 ```
 
-The client polls nothing and streams nothing. One request, one response, one image; the progress
-UI is a client-side estimate (see [the wait](#the-wait-is-an-estimate-not-a-feed)).
+The client streams nothing and polls nothing while a render is running: one request, one
+response, one image, and the progress UI is a client-side estimate (see
+[the wait](#the-wait-is-an-estimate-not-a-feed)). The one exception is the recovery path — after
+a reply is lost, the client asks for that job by id until it turns up or the budget runs out.
 
 ### The flow, in words
 
@@ -179,6 +216,34 @@ UI is a client-side estimate (see [the wait](#the-wait-is-an-estimate-not-a-feed
    back with `mode`, `model`, `transparent`, `seconds` and the image as base64.
 8. **The page renders the answer** — image, the model that made it, the time, and whether it
    carries alpha — and the GPU container sits idle for 60 s before scaling to zero.
+
+### When the reply is lost
+
+Locking a phone mid-render kills the HTTP connection: iOS suspends the page and drops the socket.
+The browser's `fetch` rejects and, before this existed, the page said *"Could not reach the
+editor"* — while the GPU, which nobody told, finished the render and billed for it. The user paid
+for an image they never saw, and retrying paid twice.
+
+So the reply is not the only way to get the result:
+
+- The client picks a **job id** with `crypto.randomUUID()` *before* sending, and writes it to
+  `localStorage` as `image-editor:pending`. The image never goes there — ids are small, images are
+  megabytes.
+- `api()` writes the finished payload to the `image-editor-results` Volume under that id, before
+  returning. The write is best-effort by design: failing to store must not turn a good render into
+  an error.
+- If the request throws or comes back marked `network`, the client **polls `result?job_id=`** —
+  20 attempts, 3s apart — instead of re-rendering. Polling is the cheap half of the problem: it
+  costs a CPU lookup, where a retry costs another H100 minute.
+- A reload, a killed tab, or a crash recovers the same way: on mount the page finds the pending
+  id, shows the waiting state, and asks for it.
+- Results live for **45 minutes**, then `result` answers `expired` and the client says so rather
+  than promising something that will never arrive. Starting over, succeeding, and expiring all
+  clear the stored id.
+
+One trap that cost a round of testing: the lookups travel the same broken path, and a server
+function *rejects* in the browser on a dead network rather than returning `{ ok: false }`. Each
+attempt is therefore guarded — one dead lookup is not a verdict.
 
 ---
 
@@ -260,11 +325,12 @@ product is one screen.
 
 ### Server functions
 
-`src/lib/edit.ts` is the only module that knows Modal exists. It exports two server functions:
+`src/lib/edit.ts` is the only module that knows Modal exists. It exports three server functions:
 
 ```ts
-editImage({ imagesBase64, prompt, steps, seed })     // requires 1–3 images
-generateImage({ prompt, steps, seed, aspect })       // no images
+editImage({ imagesBase64, prompt, steps, seed, jobId })      // requires 1–3 images
+generateImage({ prompt, steps, seed, aspect, jobId })        // no images
+collectResult({ jobId })                                     // what a lost reply owes you
 ```
 
 Both validate their own inputs and share one transport (`callModal`). The transport reads
@@ -273,8 +339,12 @@ inside the handler, posts JSON, and normalises failures into `{ ok: false, error
 never has to parse a stack trace. It also checks `body.mode` against what it asked for: a
 generate call that somehow came back as an edit is an error, not a result.
 
+`collectResult` posts nothing to the model: it asks `GET result?job_id=` and answers with the same
+`EditOutput` shape, plus `pending` (still running, ask again) and `expired` (aged out).
+
 `src/lib/credit.ts` does the same for `GET usage` — deriving the usage URL from the API URL by
-replacing `-api` with `-usage`, with `IMAGE_EDITOR_USAGE_URL` as an override.
+replacing `-api` with `-usage`, with `IMAGE_EDITOR_USAGE_URL` as an override. `collectResult`
+derives `-result` the same way, with `IMAGE_EDITOR_RESULT_URL` as the override.
 
 ### State
 
@@ -289,7 +359,12 @@ idle ──prompt+photo──────────▶ running ──ok──�
 ```
 
 `runId` is bumped on every new run and every cancellation, so a late response from an abandoned
-request can never overwrite the screen.
+request can never overwrite the screen — including the recovery poll, which gives up the moment the
+user starts something else.
+
+Besides the React state there is exactly one persisted fact: `localStorage['image-editor:pending']`,
+the id (and prompt) of a render this device is still owed. It is what makes a reload after a lock
+recover instead of forget.
 
 ### The wait is an estimate, not a feed
 
@@ -298,7 +373,8 @@ percentage: three phases (`Starting a GPU`, `Loading the model`, then `Editing` 
 capped at **92%**. The cap is deliberate — a bar that reaches 100% while the image has not
 arrived is a lie, and the arrival of the image is the only real completion signal.
 
-The dot field is 390 dots (26 × 15) lit in a **fixed** pseudo-random order: a fixed shuffle looks
+The dot field is 15 rows of as many columns as fit — 26 at desktop width, 24 on a 375px phone —
+lit in a **fixed** pseudo-random order: a fixed shuffle looks
 scattered while every tick keeps the same arrangement, where `Math.random()` per frame reads as
 noise instead of progress.
 
@@ -324,7 +400,8 @@ resolved theme.
 
 | Object | Kind | GPU | Purpose |
 |---|---|---|---|
-| `api` | FastAPI endpoint (POST) | no | Routes a request to the right class by payload |
+| `api` | FastAPI endpoint (POST) | no | Routes a request to the right class by payload, stores the result by job id |
+| `result` | FastAPI endpoint (GET) | no | Hands a finished render back by job id — the lock-and-sleep path |
 | `usage` | FastAPI endpoint (GET) | no | Remaining credit for the header chip |
 | `Editor` | `@modal.cls` | H100 | `edit(images, prompt, steps, cfg, seed)` |
 | `Painter` | `@modal.cls` | H100 | `generate(prompt, aspect, steps, cfg, seed)` |
@@ -334,7 +411,7 @@ resolved theme.
 | `volume_stats` | function | no | What is actually in the Volume |
 | `smoke` / `smoke_generate` | local entrypoints | — | One real run each, no HTTP or auth in the way |
 
-Both endpoints are `requires_proxy_auth=True`. Both classes are `max_containers=1`,
+All three endpoints are `requires_proxy_auth=True`. Both classes are `max_containers=1`,
 `scaledown_window=60`, `timeout=1200`.
 
 ### One endpoint, two jobs
@@ -415,7 +492,11 @@ is measurable rather than remembered.
 
 ## Cost model
 
-Modal bills per second of a live container. H100 SXM5 is **$0.001097/s** ($3.95/hr).
+Modal bills per second of a live container. H100 SXM5 is **$0.001097/s** ($3.95/hr). Storage is
+free inside the 1 TiB allowance, so neither Volume appears in the bill: the two checkpoints are
+93.4 GiB and a stored render is 1–3 MB, pruned after 45 minutes. The recovery lookup itself is a
+CPU container that never starts a GPU, which is the whole reason it is the cheap half of the
+problem.
 
 The important subtlety, and the one that makes naive estimates wrong: **the 60-second scaledown
 window is billed.** Modal's own pricing FAQ says containers stay alive "for 60 seconds after the
@@ -588,6 +669,10 @@ Deployment **URLs** are protected by Vercel authentication (a fine default), but
 | `MODAL_PROXY_TOKEN_ID` | same | yes | same |
 | `MODAL_PROXY_TOKEN_SECRET` | same | yes | same |
 | `IMAGE_EDITOR_USAGE_URL` | optional | no | derived from the API URL by swapping `-api` → `-usage` |
+| `IMAGE_EDITOR_RESULT_URL` | optional | no | derived from the API URL by swapping `-api` → `-result` |
+
+Derivation assumes Modal's URL shape (`<workspace>--<app>-<function>.<region>.modal.run`), so it
+follows the function name. Set the override if the app is ever renamed.
 
 Model and runtime constants live in `app.py` and are meant to be edited there:
 
@@ -600,6 +685,7 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 | `ASPECTS` | 7 buckets | trained output sizes |
 | `MAX_EDGE` (web) | 1536 px | client-side downscale before upload |
 | `MAX_UPLOAD_BYTES` (web) | 20 MB | rejected before decode |
+| `RESULTS_TTL_S` | 45 min | how long a finished render can be collected |
 
 ---
 
@@ -612,6 +698,8 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 | Does the edit model produce a sane image? | `modal run …::smoke --image … --prompt …` |
 | Does the generate model? | `modal run …::smoke_generate --prompt …` |
 | Does the transparency path work? | `modal run …::check_matting` |
+| Can a finished render be collected by id? | `POST api` with a `job_id`, then `GET result?job_id=…` |
+| Does an unknown id answer `pending`? | `GET result?job_id=never-sent` |
 | Is the app that is deployed the code I just wrote? | `modal app list`, then compare deploy time |
 
 `smoke` and `smoke_generate` call the **deployed** class through `modal.Cls.from_name`, so they
@@ -643,6 +731,15 @@ The project already has `web` as its Root Directory; run it from the repo root.
 **A 401 from the web app** — the proxy token is wrong, not the model. The server logs Modal's
 status and body so the two are distinguishable.
 
+**`Could not reach the editor` after the phone was locked** — the client lost the reply, not the
+render. It now polls `result?job_id=` for about a minute and shows the image if it lands; if the
+render was slower than that, the render is still in the results Volume for 45 minutes but nothing
+is chasing it. `localStorage['image-editor:pending']` still holds the id, so a reload retries the
+collection once more.
+
+**`That render expired`** — the entry was older than `RESULTS_TTL_S`. The store is a recovery
+window, not storage; the image was never ours to keep.
+
 **The editor answered something unexpected** — the mode guard fired: the request asked for a
 generate and got an edit (or vice versa). Check that the payload still carries `image_b64: []`
 for generations.
@@ -672,7 +769,11 @@ guessed.
   A per-IP limit on the server function is the obvious next guard.
 - **The credit chip is optimistic.** It estimates from the warm edit cost and ignores cold
   starts and the idle tail.
-- **No history.** One result at a time, and `Start over` discards it on purpose.
+- **No history.** One result at a time, and `Start over` discards it on purpose. The result store
+  is a recovery mechanism, not an album: entries expire after 45 minutes and are pruned on write.
+- **Recovery has a budget.** A lost reply is chased for about a minute. If the render takes longer
+  than that — a cold start plus a queue behind `max_containers=1` can — the user sees an error and
+  the finished render expires unclaimed.
 
 ---
 
