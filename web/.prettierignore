@@ -1,3 +1,15 @@
 package-lock.json
 pnpm-lock.yaml
 yarn.lock
+
+# Build output and generated files - formatted by their tools, not by us.
+.output
+.nitro
+dist
+dist-ssr
+.vercel
+node_modules
+public
+
+# Prose is hand-wrapped; prettier reflows tables into unreadable diffs.
+*.md

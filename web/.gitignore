@@ -12,4 +12,7 @@ dist-ssr
 __unconfig*
 todos.json
 .vercel
+# Every env file is ignored, including the committed example unless exempted -
+# without the negation below a fresh clone silently loses the template.
 .env*
+!.env.example

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here touches Modal or Vercel credentials: the web checks are static, and
+# the Python job only compiles what is on disk. A pull request from a fork must be
+# safe to run.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: web — typecheck, lint, format, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # Read the version from package.json's packageManager field, so it lives in
+          # one place. The action looks at the repo root by default, and this
+          # package.json is in web/ - without this it fails with "No pnpm version
+          # is specified".
+          package_json_file: web/package.json
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches web/package.json's `engines: node >= 22`, and what Vercel builds on.
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # --frozen-lockfile, because a CI that silently updates the lockfile is not
+      # checking the lockfile.
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm check
+      - run: pnpm build
+
+  python:
+    name: python — syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # compileall parses every file without importing it, so this catches syntax
+      # errors and nothing else - which is the point: no torch, no Modal login, no
+      # GPU, no runtime.
+      - run: python -m compileall -q modal_app/src scripts

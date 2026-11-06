@@ -1,7 +1,7 @@
 allowBuilds:
   esbuild: true
   lightningcss: true
-  unrs-resolver: true  # the scaffold left this as a placeholder; the build needs it
+  unrs-resolver: true # the scaffold left this as a placeholder; the build needs it
 minimumReleaseAgeExclude:
   - '@tanstack/react-start-rsc@0.1.63'
   - '@tanstack/react-start-server@1.167.50'
