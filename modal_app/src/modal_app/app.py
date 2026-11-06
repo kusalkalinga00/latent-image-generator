@@ -84,7 +84,9 @@ RESULTS_VOLUME_NAME = "image-editor-results"
 RESULTS_PATH = "/results"
 RESULTS_TTL_S = 45 * 60
 
-# The 4-step distilled LoRA: Apache-2.0, 70 MB, published for 2.1 specifically.
+# The 4-step distilled LoRA: 64 MiB, published for 2.1 specifically. It declares no
+# licence of its own and inherits the base model's research licence - see the
+# Licence section of the README before assuming anything about reuse.
 LORA_REPO = "lightx2v/Qwen-Image-2.1-Lightning"
 LORA_FILE = "pytorch_lora_weights.safetensors"
 

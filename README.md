@@ -313,7 +313,7 @@ attempt is therefore guarded — one dead lookup is not a verdict.
 | Output size | 1312², 1536×1024, 1024×1536, 1408×1056, 1056×1408, 1664×928, 928×1664 |
 | Peak VRAM | 44.1 GB at 1312², 60.7 GB at 2048² (measured) |
 | Speed | 3.2-3.8 s for 4 steps; 19.3 s to load the weights cold |
-| Licence | Apache 2.0 |
+| Licence | **Qwen Research Licence** — non-commercial only. See [Licence](#licence) |
 
 All weights are downloaded once into a Modal Volume and read from there on every cold start. No
 model file ever touches a developer machine, and there is no Hugging Face token because the repo
@@ -854,6 +854,8 @@ render; both are logged (`2.1 + 4-step LoRA on GPU in Ns`), so the split is chec
 - **Cancel is not cancel.** `Stop waiting` abandons the client-side promise. Modal cannot cancel
   a call already running, so the GPU finishes and bills anyway. The copy says so rather than
   pretending otherwise.
+- **Non-commercial only.** The weights are research-licensed, so this cannot be sold or run for
+  customers as-is — see [Licence](#licence).
 - **No rate limiting.** Anyone with the URL can spend the credit; the $30 is the only ceiling.
   A per-IP limit on the server function is the obvious next guard.
 - **The credit chip is optimistic.** It estimates from the warm edit cost and ignores cold
@@ -868,5 +870,28 @@ render; both are logged (`2.1 + 4-step LoRA on GPU in Ns`), so the split is chec
 
 ## Licence
 
-Application code: do as you like. Model weights: **Apache 2.0** (Qwen), and the Lightning LoRAs
-are **Apache 2.0** (LightX2V). Neither repo is gated, so no Hugging Face token is needed.
+**The application code is MIT** — see [`LICENSE`](LICENSE). Do as you like with it.
+
+**The model weights are not.** `Qwen/Qwen-Image-2.1` ships under the **Qwen Research Licence
+Agreement**, not Apache 2.0. It grants use, reproduction, modification and redistribution **for
+non-commercial purposes only**, where "non-commercial" is defined as *research or evaluation*.
+Anything else needs a separate commercial licence from Qwen, requested at
+`model-business@notice.qwencloud.com`. Redistribution also carries conditions: pass the agreement
+along with the weights, and mark any files you changed.
+
+**The 4-step LoRA declares no licence at all.** `lightx2v/Qwen-Image-2.1-Lightning` carries no
+`license` field on its model card, no `LICENSE` file in the repo, and no licence sentence in its
+README. It is a derivative adapter of the research-licensed base, so the base terms are what
+actually bind. An absent licence is not permission.
+
+**What that means here.** A personal, non-commercial studio — which is what this is — sits inside
+the grant. Charging for it, or running it for customers, does not: that needs a commercial licence
+from Qwen first. Neither repository is gated, so no Hugging Face token is needed either way.
+
+**Why this section was wrong before.** The checkpoints this replaced — Edit-2511 and 2512 — *were*
+Apache 2.0, and the sentence carried over with the migration untouched. That is how a stale line of
+documentation becomes a compliance problem, so the rule now is: read the model card, not this file.
+The licence on Qwen's card can change between releases, and it did.
+
+Everything else in the stack is permissive: `diffusers` (Apache 2.0), `transformers` (Apache 2.0),
+Modal and Vercel under their own terms.
