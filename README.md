@@ -883,7 +883,8 @@ render; both are logged (`2.1 + 4-step LoRA on GPU in Ns`), so the split is chec
 **The application code is MIT** — see [`LICENSE`](LICENSE). Do as you like with it.
 
 **The model weights are not.** `Qwen/Qwen-Image-2.1` ships under the **Qwen Research Licence
-Agreement**, not Apache 2.0. It grants use, reproduction, modification and redistribution **for
+Agreement**, not Apache 2.0 — see [`MODEL-LICENSE.md`](MODEL-LICENSE.md), which separates the two
+for anyone who only reads the licence file. It grants use, reproduction, modification and redistribution **for
 non-commercial purposes only**, where "non-commercial" is defined as *research or evaluation*.
 Anything else needs a separate commercial licence from Qwen, requested at
 `model-business@notice.qwencloud.com`. Redistribution also carries conditions: pass the agreement
