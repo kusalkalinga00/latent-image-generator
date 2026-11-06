@@ -1,4 +1,5 @@
 import { createServerFn } from '@tanstack/react-start'
+import { getRequestIP } from '@tanstack/react-start/server'
 
 /**
  * The one place that talks to Modal.
@@ -36,6 +37,25 @@ export interface GenerateInput {
   jobId?: string
 }
 
+/**
+ * The caller's address, for the backend's per-address rate limit.
+ *
+ * It has to be read here rather than in Modal: Vercel calls Modal server to
+ * server, so every request arrives from a Vercel egress address and Modal cannot
+ * tell two visitors apart. `xForwardedFor` is what carries the original address
+ * through the proxy chain.
+ *
+ * Anything unreadable becomes "unknown", which is its own bucket — the limit then
+ * applies to the population that could not be identified rather than to nobody.
+ */
+function callerIp(): string {
+  try {
+    return getRequestIP({ xForwardedFor: true })?.trim() || 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 export interface EditOutput {
   ok: boolean
   mode?: 'edit' | 'generate'
@@ -46,6 +66,8 @@ export interface EditOutput {
   expired?: boolean
   /** The request failed in transit — the render may still have completed. */
   network?: boolean
+  /** The per-address limit refused this one; `error` says for how long. */
+  limited?: boolean
   /** True when the backend returned a cut-out with a real alpha channel. */
   transparent?: boolean
   imageBase64?: string
@@ -84,6 +106,8 @@ interface ModalPayload {
   transparent?: boolean
   /** Chosen by the client before sending, so a lost reply can be collected. */
   job_id?: string
+  /** Added by callModal, not by the caller: the address the limit is counted against. */
+  client_ip?: string
 }
 
 function failed(error: string, extra: Partial<EditOutput> = {}): EditOutput {
@@ -147,7 +171,9 @@ async function callModal(
         // Modal's proxy auth accepts the id.secret pair as a bearer token.
         Authorization: `Bearer ${tokenId}.${tokenSecret}`,
       },
-      body: JSON.stringify(payload),
+      // The address rides along with the render request only; collecting a result
+      // or reading the credit balance is not rate limited.
+      body: JSON.stringify({ ...payload, client_ip: callerIp() }),
     })
 
     const text = await response.text()
@@ -218,8 +244,10 @@ export const editImage = createServerFn({ method: 'POST' })
     if (!Array.isArray(data.imagesBase64) || data.imagesBase64.length === 0) {
       return failed('Add at least one image.')
     }
-    if (data.imagesBase64.length > 3) {
-      return failed('You can add up to 3 images.')
+    // Four, matching MAX_IMAGES in the UI and the backend. This said 3 and
+    // rejected the fourth image the composer happily accepted.
+    if (data.imagesBase64.length > 4) {
+      return failed('You can add up to 4 images.')
     }
     if (
       data.imagesBase64.some(

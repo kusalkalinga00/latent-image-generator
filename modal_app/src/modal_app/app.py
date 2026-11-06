@@ -84,6 +84,17 @@ RESULTS_VOLUME_NAME = "image-editor-results"
 RESULTS_PATH = "/results"
 RESULTS_TTL_S = 45 * 60
 
+# Per-address rate limit, enforced here rather than in the web app.
+#
+# The web app knows the visitor's address; Modal does not - Vercel calls this
+# endpoint server to server, so every request arrives from Vercel's egress. The
+# address is forwarded in the payload, and the count lives in a Modal Dict because
+# the API function is not pinned to one container: an in-process counter would
+# reset on every cold start and would never see another instance's traffic.
+RATE_LIMIT_NAME = "image-editor-rate"
+RATE_LIMIT_MAX = 10
+RATE_LIMIT_WINDOW_S = 60 * 60
+
 # The 4-step distilled LoRA: 64 MiB, published for 2.1 specifically. It declares no
 # licence of its own and inherits the base model's research licence - see the
 # Licence section of the README before assuming anything about reuse.
@@ -612,6 +623,44 @@ def credit_snapshot() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 RESULTS = modal.Volume.from_name(RESULTS_VOLUME_NAME, create_if_missing=True)
+RATES = modal.Dict.from_name(RATE_LIMIT_NAME, create_if_missing=True)
+
+
+def _rate_limit(ip: str) -> tuple[bool, int]:
+    """10 renders an hour per address. Returns (allowed, retry_after_seconds).
+
+    A sliding window of timestamps, not a counter reset on the hour: a counter
+    would let a caller spend ten at 12:59 and ten more at 13:00.
+
+    The store is best-effort. If it cannot be read the render is allowed through
+    and the failure is logged - a Dict outage should degrade the limit, not take
+    down an app whose only job is to make pictures. The worst case is the old
+    behaviour: no limit.
+    """
+    key = (ip or "unknown").strip()[:64]
+    now = time.time()
+
+    try:
+        stamps = [
+            float(stamp)
+            for stamp in (RATES.get(key) or [])
+            if now - float(stamp) < RATE_LIMIT_WINDOW_S
+        ]
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        print(f"[image-editor] rate limit read failed: {type(exc).__name__}: {exc}")
+        return True, 0
+
+    if len(stamps) >= RATE_LIMIT_MAX:
+        # Time until the oldest stamp falls out of the window is what frees a slot.
+        retry_after = int(RATE_LIMIT_WINDOW_S - (now - min(stamps))) + 1
+        return False, max(1, retry_after)
+
+    stamps.append(now)
+    try:
+        RATES[key] = stamps
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] rate limit write failed: {type(exc).__name__}: {exc}")
+    return True, 0
 
 
 def _jobs_path(job_id: str) -> str:
@@ -671,6 +720,11 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     response reports what happened rather than what was asked: if no usable alpha
     comes back, it is false and the image is returned intact.
 
+    Renders are limited to ``RATE_LIMIT_MAX`` per hour per ``client_ip``, a value
+    the web app forwards because Vercel's egress is the only address this endpoint
+    can see. Refusals come back as ``{"ok": false, "limited": true}`` with the
+    seconds until a slot frees, and are the one error the UI shows verbatim.
+
     Images travel base64-encoded in both directions.
     """
     import base64
@@ -685,6 +739,22 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     raw = [item for item in raw if item]
     if len(raw) > MAX_IMAGES:
         return {"ok": False, "error": f"at most {MAX_IMAGES} images"}
+
+    # Counted before the render, after the cheap validation above: a rejected
+    # request must not spend someone's quota, and a render must not start without
+    # one. The limit is per address, per hour; the message says when it frees up.
+    allowed, retry_after = _rate_limit(str(payload.get("client_ip") or "unknown"))
+    if not allowed:
+        minutes = max(1, (retry_after + 59) // 60)
+        return {
+            "ok": False,
+            "limited": True,
+            "retry_after": retry_after,
+            "error": (
+                f"That is {RATE_LIMIT_MAX} designs an hour from this network. "
+                f"Try again in about {minutes} minute{'s' if minutes != 1 else ''}."
+            ),
+        }
 
     steps = payload.get("steps", DEFAULT_STEPS)
     seed = payload.get("seed", 0)

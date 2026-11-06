@@ -517,6 +517,12 @@ Failures are JSON with `ok: false` and a one-line `error`, never an opaque 500 �
 distinguishes "your token is wrong" (HTTP 401 from proxy auth) from "the model failed" (200 with
 `ok: false`) by shape alone.
 
+One refusal is not a failure: when the per-address limit is spent the response carries
+`limited: true` and `retry_after`, and the message says how long. The limit lives here rather than
+in the web app because the count has to be shared across containers — an in-process counter would
+reset on every cold start — and the address itself has to be forwarded, since Vercel's egress is
+the only address this endpoint can see.
+
 ### Transparency is generation, not post-processing
 
 This is the difference the 2.1 migration bought. The old checkpoints were RGB: asked for a
@@ -755,6 +761,8 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 | `VOLUME_NAME` | qwen21-weights | where its 33.1 GiB lives |
 | `DEFAULT_STEPS` | 4 | distilled path; anything else is ignored |
 | `MAX_IMAGES` | 4 | reference images per edit (2.1 accepts 10; the cap is payload) |
+| `RATE_LIMIT_MAX` | 10 | renders per address per window |
+| `RATE_LIMIT_WINDOW_S` | 3600 | the window, a sliding hour |
 | `ASPECTS` | 7 buckets, all multiples of 32 | what the pipeline can actually produce |
 | `MAX_EDGE` (web) | 1536 px | client-side downscale before upload |
 | `MAX_UPLOAD_BYTES` (web) | 20 MB | rejected before decode |
@@ -856,8 +864,10 @@ render; both are logged (`2.1 + 4-step LoRA on GPU in Ns`), so the split is chec
   pretending otherwise.
 - **Non-commercial only.** The weights are research-licensed, so this cannot be sold or run for
   customers as-is — see [Licence](#licence).
-- **No rate limiting.** Anyone with the URL can spend the credit; the $30 is the only ceiling.
-  A per-IP limit on the server function is the obvious next guard.
+- **The rate limit is per address, and addresses are easy to have more than one of.** 10 renders an
+  hour, counted in the Modal API against the address the web app forwards. That stops a casual
+  loop on one connection; it does not stop anyone determined, and the $30 credit is still the real
+  ceiling.
 - **The credit chip is optimistic.** It estimates from the warm edit cost and ignores cold
   starts and the idle tail.
 - **No history.** One result at a time, and `Start over` discards it on purpose. The result store
