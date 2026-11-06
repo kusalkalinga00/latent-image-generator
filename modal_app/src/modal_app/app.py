@@ -1,4 +1,4 @@
-"""Modal GPU backend for Qwen-Image-Edit-2511, running the 4-step Lightning LoRA.
+"""Modal GPU backend for Qwen-Image-2.1, running the 4-step Lightning LoRA.
 
 This is the **model service only**. The web UI is a separate TanStack Start app on
 Vercel that calls this over HTTPS. That split is deliberate: the browser never
@@ -6,6 +6,20 @@ talks to Modal, so no credential ever needs to reach a client, and this endpoint
 stays behind proxy auth. It is also why there is no Gradio app here any more - a
 UI living inside the GPU service ends up needing its own auth, its own secret, and
 its own failure modes for no benefit.
+
+**One model does both jobs.** The previous build ran two checkpoints -
+Qwen-Image-Edit-2511 for edits and Qwen-Image-2512 for generation - because two
+53.7 GiB checkpoints cannot share an 80 GB card. 2.1 is a single 7B model, 33.1 GiB
+in total, that both generates and edits. That removes a class, a Volume, a cold
+start, and the entire "asked for a generate, got an edit" failure mode, and it
+halves the weight load (measured: 19.3 s, against 30-70 s before).
+
+**It also removes matting.** The old checkpoints were RGB-only, so a "transparent
+background" prompt made them *paint a grey checkerboard* - the visual idiom, not
+an alpha channel - and the alpha had to be cut out afterwards by a separate CPU
+step with two methods, a u2net fallback and its own failure modes. 2.1 emits RGBA
+natively. The only post-processing left is clamping the 1-7/255 haze it leaves in
+the background to zero, which is arithmetic on one channel.
 
 Everything runs in Modal's cloud. No model weight ever touches a local machine:
 the checkpoint goes into a Modal Volume once and every container after reads it
@@ -19,9 +33,9 @@ From the repo root:
     # one-off: pull the base weights + the 4-step LoRA into the Volume
     uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights
 
-    # verify the distilled model actually runs, on a real GPU
-    uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke \
-        --prompt "make it snow" --image inputs/ref.png
+    # verify the deployed model actually runs, on a real GPU
+    uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke_generate \
+        --prompt "a lighthouse on a cliff at dusk"
 
     uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
 
@@ -30,22 +44,21 @@ alive.
 
   * ``max_containers=1`` - one GPU at a time whatever the traffic. Not a rate
     limit; it is what stops a burst of concurrent requests billing N GPUs.
-  * ``scaledown_window=60`` - release the GPU a minute after the last edit.
+  * ``scaledown_window=60`` - release the GPU a minute after the last render.
     Holding one H100 warm for a month costs $2,848.
   * **4 steps instead of 40** - the biggest lever by far, and the reason a public
     app is viable on a $30/month credit. The Lightning LoRA is a distillation of
-    the base model, published by LightX2V and linked from Qwen's own README.
+    the base model, published by LightX2V.
 
 GPU memory snapshots are deliberately NOT used: Modal's docs state they "do not
-speed up model loading from storage" and may worsen it, and for a 53.76 GiB
-checkpoint initialization is entirely storage-bound.
+speed up model loading from storage" and may worsen it, and initialization is
+entirely storage-bound.
 """
 
 from __future__ import annotations
 
 import io
 import json
-import math
 import os
 import re
 import time
@@ -55,8 +68,8 @@ from typing import Any
 import modal
 
 APP_NAME = "image-editor"
-MODEL_ID = "Qwen/Qwen-Image-Edit-2511"
-VOLUME_NAME = "image-editor-weights"
+MODEL_ID = "Qwen/Qwen-Image-2.1"
+VOLUME_NAME = "qwen21-weights"
 MODEL_CACHE = "/models/hf"
 
 # Finished renders, kept just long enough for a client to come back for them.
@@ -71,47 +84,53 @@ RESULTS_VOLUME_NAME = "image-editor-results"
 RESULTS_PATH = "/results"
 RESULTS_TTL_S = 45 * 60
 
-# The 4-step distilled LoRA: Apache-2.0, 0.85 GB, published for 2511 specifically
-# (not the 2509 or text-to-image variants, which are different repos).
-LORA_REPO = "lightx2v/Qwen-Image-Edit-2511-Lightning"
-LORA_FILE = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+# The 4-step distilled LoRA: Apache-2.0, 70 MB, published for 2.1 specifically.
+LORA_REPO = "lightx2v/Qwen-Image-2.1-Lightning"
+LORA_FILE = "pytorch_lora_weights.safetensors"
 
-# Text-to-image, for prompts with no photo attached. A different base model, so it
-# is a second class with its own container: the two checkpoints are ~54 GiB each
-# and cannot be co-resident on one 80 GB card.
-T2I_MODEL_ID = "Qwen/Qwen-Image-2512"
-T2I_LORA_REPO = "lightx2v/Qwen-Image-2512-Lightning"
-T2I_LORA_FILE = "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors"
-
-# 2512 ships a Chinese quality-negative in its own examples and the Lightning
-# reference keeps it for this checkpoint. It is a property of the model, not of the
-# user's prompt, so it travels with the pipeline instead of the request.
-T2I_NEGATIVE = (
-    "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，"
-    "人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。"
-)
-
-# The sizes Qwen and the Lightning reference use. Not arbitrary: they are the
-# buckets the model was trained at, and off-bucket sizes cost quality.
+# The trained output buckets, at the scale this app actually serves. 2.1's card
+# lists the 2048-px family; at ~1.5 MP the image still fills a phone's width and
+# the PNG stays a couple of megabytes instead of six, which matters more on mobile
+# data than the extra pixels do. Measured: 3.2-3.7 s and 44 GB peak VRAM.
+#
+# Every side is a multiple of 32. That is not a style choice: the pipeline works on
+# a 32-px latent grid and *silently* snaps what it is given - asking for 1328 came
+# back as 1312, so the reported size would disagree with the request and the aspect
+# would drift off the intended ratio.
 ASPECTS: dict[str, tuple[int, int]] = {
-    "1:1": (1328, 1328),
-    "3:2": (1584, 1056),
-    "2:3": (1056, 1584),
-    "4:3": (1472, 1104),
-    "3:4": (1104, 1472),
+    "1:1": (1312, 1312),
+    "3:2": (1536, 1024),
+    "2:3": (1024, 1536),
+    "4:3": (1408, 1056),
+    "3:4": (1056, 1408),
     "16:9": (1664, 928),
     "9:16": (928, 1664),
 }
 DEFAULT_ASPECT = "1:1"
 
-# 2511 accepts multiple reference images; cap it so one call cannot balloon VRAM.
-MAX_IMAGES = 3
-MAX_STEPS = 60
+# 2.1 accepts up to ten reference images. Four is a deliberate app-level cap: the
+# payload is base64 JSON, and ten phone photos is a lot of upload for pixels the
+# model will not use.
+MAX_IMAGES = 4
 
+# The distillation is four steps; that is the whole point of the LoRA, and the UI
+# offers no slider. ``steps`` stays in the request and is echoed back, but the
+# render always runs the distilled schedule - a "40 steps" request would silently
+# get 4 rather than pay for 40.
 LIGHTNING_STEPS = 4
-STANDARD_STEPS = 40
 DEFAULT_STEPS = LIGHTNING_STEPS
-DEFAULT_CFG = 1.0  # guidance-free, which is how the distilled model was trained
+# The distillation's own schedule: four sigmas, no terminal stretch.
+LIGHTNING_SIGMAS = [1.0, 0.75, 0.5, 0.25]
+
+# 2.1's alpha is real but not exact: the background comes back at about 1-7/255
+# rather than 0. Invisible on screen, but it would tint a composited image, so
+# everything under this is snapped to fully transparent.
+ALPHA_CLAMP = 8
+
+# How the model is asked for alpha. Qwen's card is explicit that this phrasing is
+# the one it was trained on, and the pilot confirmed it: RGBA out, no checkerboard.
+RGBA_PREFIX = "This is an RGBA image with transparency. "
+RGBA_SUFFIX = " The image has alpha channel and the background is transparent."
 
 app = modal.App(APP_NAME)
 weights = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -130,14 +149,13 @@ gpu_image = (
         # imports Torchvision lazily at load time, so the image builds happily
         # without it and the model then dies on the GPU.
         "torchvision",
-        # Qwen's README says install diffusers from git. 0.41.0 ships
-        # QwenImageEditPlusPipeline, so a pinned release is reproducible.
+        # 0.41.0 ships QwenImage21Pipeline, so a pinned release is reproducible.
         "diffusers==0.41.0",
         # Also invisible until load time: diffusers raises "PEFT backend is
         # required for load_lora_weights()" only when the LoRA is attached, so the
         # image builds and the pipeline constructs fine without it.
         "peft",
-        "transformers>=4.51.3",  # Qwen2.5-VL support, per Qwen's Quick Start
+        "transformers>=5.17",  # 2.1's requirement, per its Quick Start
         "accelerate",
         "safetensors",
         "sentencepiece",
@@ -146,52 +164,39 @@ gpu_image = (
         "huggingface_hub",
         "einops",
     )
-    .env({"HF_HOME": MODEL_CACHE, "HF_HUB_DISABLE_TELEMETRY": "1"})
+    # Xet - HF's chunked transfer - stalled at 28.2 of 33 GiB here and never
+    # resumed; plain HTTP transfers resume, retry and report progress instead.
+    .env(
+        {
+            "HF_HOME": MODEL_CACHE,
+            "HF_HUB_DISABLE_TELEMETRY": "1",
+            "HF_HUB_DISABLE_XET": "1",
+        }
+    )
 )
-
-# Where a transparency request gets its alpha channel. The diffusion model is an
-# RGB model: "transparent background" is a visual idiom it has learned to paint
-# (usually as a grey checkerboard), so alpha has to be cut out afterwards - see
-# matting.py for why there are two methods.
-MATTING_HOME = "/models/u2net"
-MATTING_MODEL = "u2net"
 
 # The API layer holds no model, so it needs no torch: it decodes JSON, calls the
 # GPU class, and encodes the result. A light image keeps its cold start and its
-# idle cost near zero. The matting step runs here rather than on the GPU, because
-# a cutout is CPU work and GPU seconds are a hundred times more expensive.
-api_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .uv_pip_install("fastapi[standard]", "pillow", "numpy", "rembg[cpu]")
-    # The matting code lives in its own module; Modal mounts a single file by
-    # default, so the package has to be added explicitly or the import fails only
-    # once a container is running.
-    .add_local_python_source("modal_app", copy=True)
-    .env({"U2NET_HOME": MATTING_HOME})
+# idle cost near zero. Pillow is here for the alpha clamp, which is arithmetic on
+# one channel and not worth a GPU second.
+api_image = modal.Image.debian_slim(python_version="3.12").uv_pip_install(
+    "fastapi[standard]", "pillow"
 )
 
-
-
-# The distillation scheduler. This cannot be inferred from the LoRA file - it is a
-# property of how the model was distilled, and loading the LoRA onto the pipeline's
-# *default* scheduler is the mistake the Lightning repo documents as grid
-# artifacts. Lifted from their generate_with_diffusers.py, where the comment reads
-# "We use shift=3 in distillation".
+# The distillation's scheduler. This cannot be inferred from the LoRA file - it is
+# a property of how the model was distilled, and loading the LoRA onto the
+# pipeline's *default* scheduler is the mistake the Lightning repo documents as
+# grid artifacts. These are the values published with the 2.1 LoRA, and they are
+# not the 2511 ones: base_shift 0.5 and max_shift 0.9, not log(3) for both.
 LIGHTNING_SCHEDULER_CONFIG = {
-    "base_image_seq_len": 256,
-    "base_shift": math.log(3),
-    "invert_sigmas": False,
-    "max_image_seq_len": 8192,
-    "max_shift": math.log(3),
     "num_train_timesteps": 1000,
-    "shift": 1.0,
-    "shift_terminal": None,
-    "stochastic_sampling": False,
-    "time_shift_type": "exponential",
-    "use_beta_sigmas": False,
     "use_dynamic_shifting": True,
-    "use_exponential_sigmas": False,
-    "use_karras_sigmas": False,
+    "time_shift_type": "exponential",
+    "base_image_seq_len": 256,
+    "max_image_seq_len": 8192,
+    "base_shift": 0.5,
+    "max_shift": 0.9,
+    "shift_terminal": None,
 }
 
 
@@ -208,198 +213,140 @@ def check_env() -> str:
     wasted H100 container to learn: importing a library does not exercise it, and
     torchvision was missing from an image that imported everything successfully.
 
+    It also constructs the distillation scheduler for real. That is the only thing
+    that validates LIGHTNING_SCHEDULER_CONFIG, which is otherwise first exercised
+    on an H100.
+
     Returns a JSON *string* and coerces every field to a plain str/bool. Modal
     unpickles the return value in the **local** environment, which has no torch, so
     anything carrying a torch-defined class fails to deserialize with a misleading
     "the 'torch' module is not available in the local environment".
     """
-    import json
-
     import diffusers
     import torch
     import torchvision
     import transformers
+    from diffusers import FlowMatchEulerDiscreteScheduler, QwenImage21Pipeline
 
-    info = {
+    info: dict[str, Any] = {
         "torch": str(torch.__version__),
         "torchvision": str(torchvision.__version__),
         "diffusers": str(diffusers.__version__),
         "transformers": str(transformers.__version__),
-        "has_qwen_image_edit_plus": bool(
-            hasattr(diffusers, "QwenImageEditPlusPipeline")
-        ),
-        # The text-to-image class. Pinned diffusers is 0.41.0; if this ever reads
-        # False the generate path cannot even be constructed.
-        "has_qwen_image_pipeline": bool(hasattr(diffusers, "QwenImagePipeline")),
+        "has_qwen_image_21_pipeline": True,
+        "pipeline": QwenImage21Pipeline.__name__,
         "aspects": sorted(ASPECTS),
     }
 
-    # subfolder="processor" is required. This repo keeps every component in its own
-    # subfolder and has no root-level processing class, so a root-level lookup
-    # reports "Unrecognized processing class" against a perfectly healthy model -
-    # a false alarm, which is worse than no check at all.
+    # 2.1 keeps components in subfolders, so try the subfolder first and fall back
+    # to the repo root. Which layout a Qwen release uses has changed between
+    # versions, and a lookup that reports "Unrecognized processing class" against a
+    # healthy model is a false alarm - worse than no check at all.
     from transformers import AutoProcessor
 
-    try:
-        processor = AutoProcessor.from_pretrained(MODEL_ID, subfolder="processor")
-        info["processor"] = type(processor).__name__
-        info["processor_ok"] = True
-    except Exception as exc:
-        info["processor"] = f"{type(exc).__name__}: {exc}"
-        info["processor_ok"] = False
-
-    # Mirror the exact imports the Lightning path needs, and build the distillation
-    # scheduler for real. Two separate missing-backend failures (torchvision, then
-    # peft) both surfaced only at model-load time on a GPU; checking that the
-    # imports resolve and the scheduler constructs turns the third one into a
-    # couple of cents. Constructing the scheduler is what actually validates
-    # LIGHTNING_SCHEDULER_CONFIG, which is otherwise only exercised on an H100.
-    from diffusers import FlowMatchEulerDiscreteScheduler
-
-    try:
-        from diffusers.models import QwenImageTransformer2DModel  # noqa: F401
-
-        info["lightning_imports_ok"] = True
-    except Exception as exc:
-        info["lightning_imports_ok"] = False
-        info["lightning_imports_error"] = f"{type(exc).__name__}: {exc}"
+    for subfolder in ("processor", None):
+        try:
+            processor = (
+                AutoProcessor.from_pretrained(
+                    MODEL_ID, subfolder=subfolder, cache_dir=MODEL_CACHE
+                )
+                if subfolder
+                else AutoProcessor.from_pretrained(MODEL_ID, cache_dir=MODEL_CACHE)
+            )
+            info["processor"] = type(processor).__name__
+            info["processor_subfolder"] = subfolder or "<root>"
+            info["processor_ok"] = True
+            break
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            info["processor"] = f"{type(exc).__name__}: {exc}"
+            info["processor_ok"] = False
 
     try:
         import peft
 
         info["peft"] = str(peft.__version__)
         info["lora_backend_ok"] = True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         info["peft"] = f"{type(exc).__name__}: {exc}"
         info["lora_backend_ok"] = False
 
     try:
-        sched = FlowMatchEulerDiscreteScheduler.from_config(LIGHTNING_SCHEDULER_CONFIG)
-        info["lightning_scheduler"] = type(sched).__name__
+        scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            LIGHTNING_SCHEDULER_CONFIG
+        )
+        info["lightning_scheduler"] = type(scheduler).__name__
         info["lightning_scheduler_ok"] = True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         info["lightning_scheduler"] = f"{type(exc).__name__}: {exc}"
         info["lightning_scheduler_ok"] = False
+
+    try:
+        # The LoRA must be fetchable, not merely present in the repo: it is what
+        # makes 4 steps possible, and a missing file only surfaces at load time.
+        from huggingface_hub import hf_hub_download
+
+        path = hf_hub_download(
+            repo_id=LORA_REPO, filename=LORA_FILE, cache_dir=MODEL_CACHE
+        )
+        info["lora_bytes"] = os.path.getsize(path)
+        info["lora_ok"] = True
+    except Exception as exc:  # noqa: BLE001
+        info["lora"] = f"{type(exc).__name__}: {exc}"
+        info["lora_ok"] = False
 
     print("[image-editor] env: " + json.dumps(info, indent=2))
     return json.dumps(info)
 
 
-def _download(model_id: str, lora_repo: str, lora_file: str) -> dict[str, Any]:
-    """Fetch a checkpoint plus its LoRA into the Volume and report what landed."""
-    import json
-    import os
-    import time
-
-    from huggingface_hub import hf_hub_download, snapshot_download
-
-    started = time.time()
-    path = snapshot_download(model_id, max_workers=8)
-    lora_path = hf_hub_download(repo_id=lora_repo, filename=lora_file)
-
+def _tree_bytes(root: str) -> tuple[int, int]:
     total = 0
-    for root, _dirs, names in os.walk(MODEL_CACHE):
+    files = 0
+    for base, _dirs, names in os.walk(root):
         for name in names:
-            full = os.path.join(root, name)
+            path = os.path.join(base, name)
             # An HF cache stores real bytes in blobs/ and links them into
             # snapshots/; counting symlinks too would roughly double the figure.
-            if os.path.islink(full):
+            if os.path.islink(path):
                 continue
-            total += os.path.getsize(full)
-
-    # Without commit() the writes vanish when the container exits, and every cold
-    # start silently re-downloads the whole thing.
-    weights.commit()
-
-    info = {
-        "model": model_id,
-        "model_path": path,
-        "lora_path": lora_path,
-        "bytes": total,
-        "gib": round(total / 1024**3, 2),
-        "seconds": round(time.time() - started, 1),
-    }
-    print("[image-editor] downloaded: " + json.dumps(info))
-    return info
+            try:
+                total += os.path.getsize(path)
+                files += 1
+            except OSError:
+                pass
+    return total, files
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=5400, cpu=4)
 def download_weights() -> str:
-    """The edit checkpoint (~54 GiB) and its LoRA. Storage is free under 1 TiB."""
-    import json
+    """The base model (33.1 GiB) and its 4-step LoRA. Storage is free under 1 TiB."""
+    from huggingface_hub import hf_hub_download, snapshot_download
 
-    return json.dumps(_download(MODEL_ID, LORA_REPO, LORA_FILE))
-
-
-@app.function(image=gpu_image, volumes={"/models": weights}, timeout=5400, cpu=4)
-def download_t2i() -> str:
-    """The text-to-image checkpoint (~57 GiB) and its 4-step LoRA."""
-    import json
-
-    return json.dumps(_download(T2I_MODEL_ID, T2I_LORA_REPO, T2I_LORA_FILE))
-
-
-@app.function(image=api_image, volumes={"/models": weights}, timeout=300, cpu=1)
-def check_matting() -> str:
-    """Prove the cutout path inside the real API image, on a synthetic image.
-
-    A GPU render costs a cold start; a red square on white costs nothing and
-    exercises the same code: import, key, cleanup, PNG encode.
-    """
-    import io
-    import json
-
-    import numpy as np
-    from modal_app.matting import cutout
-    from PIL import Image
-
-    canvas = Image.new("RGB", (512, 512), (255, 255, 255))
-    for y in range(160, 352):
-        for x in range(160, 352):
-            canvas.putpixel((x, y), (200, 24, 24))
-    buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
-
-    out = cutout(buf.getvalue())
-    alpha = np.asarray(Image.open(io.BytesIO(out)))[:, :, 3]
-    info = {
-        "mode": Image.open(io.BytesIO(out)).mode,
-        "transparent": round(float((alpha == 0).mean()), 3),
-        "opaque": round(float((alpha == 255).mean()), 3),
-        "bytes": len(out),
-    }
-    print("[image-editor] matting: " + json.dumps(info))
-    if info["mode"] != "RGBA" or info["transparent"] < 0.5 or info["opaque"] < 0.05:
-        raise RuntimeError(f"cutout looks wrong: {info}")
-    return json.dumps(info)
-
-
-@app.function(image=api_image, volumes={"/models": weights}, timeout=900, cpu=1)
-def download_matting() -> str:
-    """Cache the u2net weights in the Volume so a cold API container does not fetch them."""
-    from rembg import new_session
-
-    new_session(MATTING_MODEL)
+    weights.reload()
+    started = time.time()
+    snapshot_download(MODEL_ID, cache_dir=MODEL_CACHE, max_workers=8)
+    lora_path = hf_hub_download(
+        repo_id=LORA_REPO, filename=LORA_FILE, cache_dir=MODEL_CACHE
+    )
+    total, files = _tree_bytes(MODEL_CACHE)
+    # Without commit() the writes vanish when the container exits, and every cold
+    # start silently re-downloads the whole thing.
     weights.commit()
-    return "u2net cached"
+    info = {
+        "model": MODEL_ID,
+        "lora": lora_path,
+        "gib": round(total / 1024**3, 2),
+        "files": files,
+        "seconds": round(time.time() - started, 1),
+    }
+    print("[image-editor] downloaded: " + json.dumps(info))
+    return json.dumps(info)
 
 
 @app.function(image=gpu_image, volumes={"/models": weights}, timeout=900, cpu=2)
 def volume_stats() -> str:
     """Report what is actually in the Volume. Measured, not assumed."""
-    import json
-    import os
-
-    files = 0
-    total = 0
-    for root, _dirs, names in os.walk(MODEL_CACHE):
-        for name in names:
-            full = os.path.join(root, name)
-            if os.path.islink(full):
-                continue
-            files += 1
-            total += os.path.getsize(full)
-
+    weights.reload()
+    total, files = _tree_bytes(MODEL_CACHE)
     info = {"files": files, "bytes": total, "gib": round(total / 1024**3, 2)}
     print("[image-editor] volume: " + json.dumps(info))
     return json.dumps(info)
@@ -410,6 +357,56 @@ def volume_stats() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _snap_alpha(png: bytes) -> bytes:
+    """Clamp the faint background haze to fully transparent.
+
+    2.1's background sits around 1-7/255 rather than 0: invisible on a screen, but
+    a colour fringe once composited. Everything under ALPHA_CLAMP becomes 0, so the
+    file a user downloads is a clean matte rather than an almost-clean one.
+    """
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png))
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    alpha = image.getchannel("A").point(
+        lambda value: 0 if value < ALPHA_CLAMP else value
+    )
+    image.putalpha(alpha)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _flatten(png: bytes) -> bytes:
+    """Composite onto white when transparency was not asked for.
+
+    The pipeline returns RGBA either way, and the UI draws a checkerboard wherever
+    the result has alpha. Leaving it in would tell the user they got a cutout when
+    the request never asked for one.
+    """
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png))
+    if image.mode != "RGBA":
+        return png
+    canvas = Image.new("RGB", image.size, (255, 255, 255))
+    canvas.paste(image, mask=image.getchannel("A"))
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _useful_alpha(png: bytes) -> bool:
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png))
+    if image.mode != "RGBA":
+        return False
+    low, _high = image.getchannel("A").getextrema()
+    return low < 250
+
+
 @app.cls(
     image=gpu_image,
     gpu="H100",
@@ -418,239 +415,124 @@ def volume_stats() -> str:
     scaledown_window=60,
     max_containers=1,
 )
-class Editor:
+class Image21:
+    """Generation and editing, in one container and one checkpoint."""
+
     @modal.enter()
     def load(self) -> None:
-        import time
-
         import torch
-        from diffusers import (
-            FlowMatchEulerDiscreteScheduler,
-            QwenImageEditPlusPipeline,
-        )
-        from diffusers.models import QwenImageTransformer2DModel
-        from huggingface_hub import hf_hub_download
+        from diffusers import FlowMatchEulerDiscreteScheduler, QwenImage21Pipeline
+        from huggingface_hub import snapshot_download
 
         started = time.time()
+        weights.reload()
+        self.pipe = QwenImage21Pipeline.from_pretrained(
+            MODEL_ID, cache_dir=MODEL_CACHE, torch_dtype=torch.bfloat16
+        ).to("cuda")
 
-        # Same construction order as the Lightning reference script: build the
-        # transformer, hand the pipeline the distillation scheduler, and attach the
-        # LoRA last. Loading the LoRA onto a default-scheduler pipeline is exactly
-        # the mistake their README documents as grid artifacts.
-        transformer = QwenImageTransformer2DModel.from_pretrained(
-            MODEL_ID, subfolder="transformer", torch_dtype=torch.bfloat16
+        # Attach the LoRA last, onto a pipeline that already has the distillation
+        # scheduler - the order the Lightning reference uses.
+        lora_dir = snapshot_download(
+            LORA_REPO, cache_dir=MODEL_CACHE, local_files_only=True
         )
-        scheduler = FlowMatchEulerDiscreteScheduler.from_config(
-            LIGHTNING_SCHEDULER_CONFIG
+        self.pipe.load_lora_weights(
+            lora_dir, weight_name=LORA_FILE, adapter_name="lightning"
         )
-        self.pipe = QwenImageEditPlusPipeline.from_pretrained(
-            MODEL_ID,
-            transformer=transformer,
-            scheduler=scheduler,
-            torch_dtype=torch.bfloat16,
+        self.pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            self.pipe.scheduler.config, **LIGHTNING_SCHEDULER_CONFIG
         )
-        lora_path = hf_hub_download(repo_id=LORA_REPO, filename=LORA_FILE)
-        self.pipe.load_lora_weights(lora_path)
-        self.pipe.to("cuda")
         self.pipe.set_progress_bar_config(disable=True)
 
         # Logged so the cold-start share of a bill is visible rather than guessed.
-        print(
-            f"[image-editor] pipeline + 4-step LoRA on GPU in "
-            f"{time.time() - started:.1f}s"
-        )
+        print(f"[image-editor] 2.1 + 4-step LoRA on GPU in {time.time() - started:.1f}s")
 
     @modal.method()
-    def edit(
+    def render(
         self,
-        images: list[bytes],
         prompt: str,
-        steps: int = DEFAULT_STEPS,
-        cfg: float = DEFAULT_CFG,
+        aspect: str = DEFAULT_ASPECT,
+        images: list[str] | None = None,
+        steps: int = LIGHTNING_STEPS,
         seed: int = 0,
+        transparent: bool = False,
     ) -> dict[str, Any]:
-        """Edit one image, or compose several, from a natural-language instruction."""
-        import time
+        """Edit if images arrive, generate if not. One model, one code path."""
+        import base64
 
         import torch
         from PIL import Image
 
-        if not images:
-            raise ValueError("at least one image is required")
-        if len(images) > MAX_IMAGES:
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        if images and len(images) > MAX_IMAGES:
             raise ValueError(f"at most {MAX_IMAGES} images are supported")
-        if not prompt.strip():
-            raise ValueError("prompt must not be empty")
 
-        steps = max(1, min(int(steps), MAX_STEPS))
-        pil: list[Image.Image] = []
-        for raw in images:
-            img = Image.open(io.BytesIO(raw))
-            img.load()
-            pil.append(img.convert("RGB"))
+        text = f"{RGBA_PREFIX}{prompt}{RGBA_SUFFIX}" if transparent else prompt
 
-        generator = torch.Generator(device="cuda").manual_seed(int(seed))
-        kwargs: dict[str, Any] = {
-            "image": pil,
-            "prompt": prompt,
-            "generator": generator,
-            "true_cfg_scale": float(cfg),
-            "negative_prompt": " ",  # what the edit models expect
-            "num_inference_steps": steps,
-        }
-        # The Lightning reference passes no guidance_scale at all, while Qwen's
-        # 40-step example passes 1.0. Follow whichever mode is in use rather than
-        # assuming the two are interchangeable.
-        if steps > LIGHTNING_STEPS:
-            kwargs["guidance_scale"] = 1.0
+        kwargs: dict[str, Any] = {}
+        if images:
+            decoded = [
+                Image.open(io.BytesIO(base64.b64decode(item))).convert("RGB")
+                for item in images
+            ]
+            # An edit inherits the source's size: the UI never offers a shape
+            # picker for edits, and resizing a photo would be an unasked-for edit.
+            kwargs["image"] = decoded[0] if len(decoded) == 1 else decoded
+        else:
+            width, height = ASPECTS.get(aspect, ASPECTS[DEFAULT_ASPECT])
+            kwargs["width"] = width
+            kwargs["height"] = height
 
         started = time.time()
         with torch.inference_mode():
-            result = self.pipe(**kwargs)
+            result = self.pipe(
+                prompt=text,
+                num_inference_steps=LIGHTNING_STEPS,
+                sigmas=LIGHTNING_SIGMAS,
+                true_cfg_scale=1.0,
+                use_kv_cache=False,
+                generator=torch.Generator("cuda").manual_seed(int(seed) or 0),
+                **kwargs,
+            )
         elapsed = time.time() - started
 
-        buf = io.BytesIO()
-        result.images[0].save(buf, format="PNG")
+        buffer = io.BytesIO()
+        result.images[0].save(buffer, format="PNG")
+        png = buffer.getvalue()
+        # Read the alpha before flattening: this says whether the model gave us an
+        # alpha channel, not whether the request asked for one.
+        had_alpha = _useful_alpha(png)
+        png = _snap_alpha(png) if transparent else _flatten(png)
+
         return {
-            "png": buf.getvalue(),
+            "png": png,
+            # False when the model returned no usable alpha, so the client never
+            # claims a transparency that is not there.
+            "transparent": bool(transparent and had_alpha),
             "seconds": round(elapsed, 2),
-            "steps": steps,
-            "cfg": float(cfg),
-            "input_images": len(pil),
+            "steps": LIGHTNING_STEPS,
             "size": list(result.images[0].size),
         }
 
 
-@app.cls(
-    image=gpu_image,
-    gpu="H100",
-    volumes={"/models": weights},
-    timeout=1200,
-    scaledown_window=60,
-    max_containers=1,
-)
-class Painter:
-    """Text-to-image, for a prompt with no photo attached.
-
-    A separate class, not a branch inside Editor: both checkpoints are ~54 GiB, so
-    they cannot share an 80 GB card. Two classes means two cold starts but each
-    container only ever holds the model it is working with.
-    """
-
-    @modal.enter()
-    def load(self) -> None:
-        import time
-
-        import torch
-        from diffusers import FlowMatchEulerDiscreteScheduler, QwenImagePipeline
-        from diffusers.models import QwenImageTransformer2DModel
-        from huggingface_hub import hf_hub_download
-
-        started = time.time()
-
-        # Same order as the editor: build the transformer, hand the pipeline the
-        # distillation scheduler, attach the LoRA last. Both LoRAs were distilled
-        # with shift=3, which is what LIGHTNING_SCHEDULER_CONFIG encodes.
-        transformer = QwenImageTransformer2DModel.from_pretrained(
-            T2I_MODEL_ID, subfolder="transformer", torch_dtype=torch.bfloat16
-        )
-        scheduler = FlowMatchEulerDiscreteScheduler.from_config(
-            LIGHTNING_SCHEDULER_CONFIG
-        )
-        self.pipe = QwenImagePipeline.from_pretrained(
-            T2I_MODEL_ID,
-            transformer=transformer,
-            scheduler=scheduler,
-            torch_dtype=torch.bfloat16,
-        )
-        lora_path = hf_hub_download(repo_id=T2I_LORA_REPO, filename=T2I_LORA_FILE)
-        self.pipe.load_lora_weights(lora_path)
-        self.pipe.to("cuda")
-        self.pipe.set_progress_bar_config(disable=True)
-
-        print(
-            f"[image-editor] painter + 4-step LoRA on GPU in "
-            f"{time.time() - started:.1f}s"
-        )
-
-    @modal.method()
-    def generate(
-        self,
-        prompt: str,
-        aspect: str = DEFAULT_ASPECT,
-        steps: int = DEFAULT_STEPS,
-        cfg: float = DEFAULT_CFG,
-        seed: int = 0,
-    ) -> dict[str, Any]:
-        """Generate an image from a prompt alone."""
-        import time
-
-        import torch
-
-        if not prompt.strip():
-            raise ValueError("prompt must not be empty")
-
-        steps = max(1, min(int(steps), MAX_STEPS))
-        width, height = ASPECTS.get(aspect, ASPECTS[DEFAULT_ASPECT])
-
-        kwargs: dict[str, Any] = {
-            "prompt": prompt,
-            "negative_prompt": T2I_NEGATIVE,
-            "width": width,
-            "height": height,
-            "generator": torch.Generator(device="cuda").manual_seed(int(seed)),
-            "true_cfg_scale": float(cfg),
-            "num_inference_steps": steps,
-        }
-        # Same rule as the editor: the distilled path takes no guidance, the slower
-        # one does.
-        if steps > LIGHTNING_STEPS:
-            kwargs["guidance_scale"] = 1.0
-
-        started = time.time()
-        with torch.inference_mode():
-            result = self.pipe(**kwargs)
-        elapsed = time.time() - started
-
-        buf = io.BytesIO()
-        result.images[0].save(buf, format="PNG")
-        return {
-            "png": buf.getvalue(),
-            "seconds": round(elapsed, 2),
-            "steps": steps,
-            "cfg": float(cfg),
-            "size": list(result.images[0].size),
-            "aspect": aspect,
-        }
-
-
-def _editor() -> Any:
-    """Resolve the deployed GPU class, from a web container or a local entrypoint."""
-    return modal.Cls.from_name(APP_NAME, "Editor")
-
-
-def _painter() -> Any:
-    return modal.Cls.from_name(APP_NAME, "Painter")
-
-
-def _run_edit(
-    images: list[bytes], prompt: str, steps: int, cfg: float, seed: int
+def _render(
+    prompt: str,
+    aspect: str,
+    images: list[bytes],
+    steps: int,
+    seed: int,
+    transparent: bool,
 ) -> dict[str, Any]:
-    """The one place that calls the GPU, shared by the API and the smoke test."""
-    return _editor()().edit.remote(
-        images=images, prompt=prompt, steps=int(steps), cfg=float(cfg), seed=int(seed)
-    )
+    """The one place that calls the GPU, shared by the API and the smoke tests."""
+    import base64
 
-
-def _run_generate(
-    prompt: str, aspect: str, steps: int, cfg: float, seed: int
-) -> dict[str, Any]:
-    return _painter()().generate.remote(
+    return Image21().render.remote(
         prompt=prompt,
         aspect=aspect,
+        images=[base64.b64encode(item).decode("ascii") for item in images] or None,
         steps=int(steps),
-        cfg=float(cfg),
         seed=int(seed),
+        transparent=bool(transparent),
     )
 
 
@@ -661,10 +543,11 @@ def _run_generate(
 # Starter plan compute grant. The billing summary reports only the portion
 # already applied, so the remainder is this grant minus that amount.
 MONTHLY_CREDIT_USD = Decimal("30")
-# Measured on an H100 for a 896x1184 image. See the README cost table.
-COLD_LOAD_SECONDS = Decimal("31.7")
-WARM_EDIT_SECONDS = Decimal("3.61")
-# scaledown_window on Editor: the GPU stays up this long after the last edit.
+# Measured on this deployment: 33.1 GiB off the Volume, then a 4-step render at
+# 1328px. Both are H100 seconds, which is all this estimate cares about.
+COLD_LOAD_SECONDS = Decimal("19.3")
+WARM_EDIT_SECONDS = Decimal("3.73")
+# scaledown_window: the GPU stays up this long after the last render.
 IDLE_SECONDS = Decimal("60")
 
 
@@ -676,11 +559,11 @@ def _adjustment(summary: Any, name: str) -> Decimal:
 
 
 def estimate_edits(remaining: Decimal, h100_hour: Decimal) -> tuple[int, int]:
-    """How many 4-step edits the remaining credit covers.
+    """How many 4-step renders the remaining credit covers.
 
-    A cold edit pays the weight load, the edit, and the idle minute before the
-    GPU shuts down. Further edits in the same sitting pay only the edit itself;
-    the load and the trailing minute are paid once.
+    A cold render pays the weight load, the render, and the idle minute before the
+    GPU shuts down. Further renders in the same sitting pay only the render
+    itself; the load and the trailing minute are paid once.
     """
     if remaining <= 0 or h100_hour <= 0:
         return 0, 0
@@ -699,7 +582,7 @@ def estimate_edits(remaining: Decimal, h100_hour: Decimal) -> tuple[int, int]:
 
 
 def credit_snapshot() -> dict[str, Any]:
-    """Remaining Starter credit, and the edits it still covers."""
+    """Remaining Starter credit, and the renders it still covers."""
     workspace = modal.Workspace.from_context()
     summary = workspace.billing.summary()
     rates = workspace.billing.rates()
@@ -725,7 +608,6 @@ def credit_snapshot() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # JSON API - called by the Vercel app's server, never by a browser
 # --------------------------------------------------------------------------- #
-
 
 RESULTS = modal.Volume.from_name(RESULTS_VOLUME_NAME, create_if_missing=True)
 
@@ -763,26 +645,29 @@ def _prune_results() -> None:
             pass
 
 
-@app.function(image=api_image, volumes={"/models": weights, RESULTS_PATH: RESULTS}, timeout=1200)
+@app.function(
+    image=api_image, volumes={"/models": weights, RESULTS_PATH: RESULTS}, timeout=1200
+)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def api(payload: dict[str, Any]) -> dict[str, Any]:
-    """Edit endpoint.
+    """Edit or generate endpoint.
 
     Proxy-auth protected, so the credential lives in the Vercel app's environment
     variables and never reaches a browser. Called server-to-server, so there is no
     CORS to configure and no client-side secret to leak.
 
         POST <url>
-        Authorization: Bearer <MODAL...RET>
+        Authorization: Bearer ***
         {"image_b64": ["..."], "prompt": "...", "steps": 4, "seed": 0}
 
     One endpoint, two jobs, decided by whether a photo came with the prompt: no
     image means generate, an image means edit. That keeps the web app from having
     to know which endpoint to call, and keeps the mode in one place.
 
-    ``transparent: true`` cuts the background out afterwards and returns RGBA. The
-    model itself cannot do this - it renders RGB, and paints a checkerboard when
-    asked for "transparent" - so the alpha channel is produced here, on the CPU.
+    ``transparent: true`` now asks the model for an alpha channel it can actually
+    produce, then clamps the near-zero background to true zero. The field in the
+    response reports what happened rather than what was asked: if no usable alpha
+    comes back, it is false and the image is returned intact.
 
     Images travel base64-encoded in both directions.
     """
@@ -800,8 +685,8 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"at most {MAX_IMAGES} images"}
 
     steps = payload.get("steps", DEFAULT_STEPS)
-    cfg = payload.get("cfg", DEFAULT_CFG)
     seed = payload.get("seed", 0)
+    transparent = bool(payload.get("transparent"))
 
     try:
         if raw:
@@ -809,40 +694,25 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
                 decoded = [base64.b64decode(item) for item in raw]
             except Exception as exc:
                 return {"ok": False, "error": f"image_b64 is not valid base64: {exc}"}
-            out = _run_edit(decoded, prompt, steps, cfg, seed)
+            out = _render(prompt, DEFAULT_ASPECT, decoded, steps, seed, transparent)
             mode = "edit"
         else:
             aspect = str(payload.get("aspect") or DEFAULT_ASPECT)
-            out = _run_generate(prompt, aspect, steps, cfg, seed)
+            out = _render(prompt, aspect, [], steps, seed, transparent)
             mode = "generate"
     except Exception as exc:
         # Surface model failures as JSON rather than an opaque 500, so the web app
         # can show the user what actually went wrong.
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    png = out["png"]
-    transparent = bool(payload.get("transparent"))
-    if transparent:
-        try:
-            from modal_app.matting import cutout
-
-            png = cutout(png)
-        except Exception as exc:
-            # A failed cutout should not lose the image the user waited for.
-            print(f"[image-editor] cutout failed: {type(exc).__name__}: {exc}")
-            transparent = False
-
     body = {
         "ok": True,
         "mode": mode,
-        # Which checkpoint actually answered. The client shows this next to the
-        # result, so it is read from the same branch that picked the class rather
-        # than inferred on the other side.
-        "model": MODEL_ID if mode == "edit" else T2I_MODEL_ID,
-        # False when the cutout failed, so the UI never claims an alpha channel
-        # that is not there.
-        "transparent": transparent,
-        "image_b64": base64.b64encode(png).decode("ascii"),
+        # One model now, so this is the same string either way - but the field
+        # stays: the client shows it, and it is how a result is attributed.
+        "model": MODEL_ID,
+        "transparent": out["transparent"],
+        "image_b64": base64.b64encode(out["png"]).decode("ascii"),
         "seconds": out["seconds"],
         "steps": out["steps"],
         "size": out["size"],
@@ -860,9 +730,9 @@ def result(job_id: str = "") -> dict[str, Any]:
     """Collect a render by job id.
 
     ``{"ok": true, "pending": true}`` means the render is not finished yet - the
-    client should keep waiting rather than start a second one. ``status: 410``
-    -style expiry is expressed as ``expired`` so the client can say something
-    honest instead of retrying into a result that will never arrive.
+    client should keep waiting rather than start a second one. ``expired`` lets
+    the client say something honest instead of retrying into a result that will
+    never arrive.
     """
     safe = re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:64]
     if not safe:
@@ -894,10 +764,16 @@ def usage() -> dict[str, Any]:
         return {"ok": False, "error": "Credit balance is unavailable."}
 
 
+# --------------------------------------------------------------------------- #
+# Local entry points
+# --------------------------------------------------------------------------- #
+
+
 @app.local_entrypoint()
 def smoke_generate(
     prompt: str = "A lighthouse on a cliff at dusk, long exposure, cinematic",
     aspect: str = DEFAULT_ASPECT,
+    transparent: bool = False,
 ) -> None:
     """One real generation on the deployed GPU class. No HTTP, no auth in the way.
 
@@ -905,13 +781,9 @@ def smoke_generate(
             --prompt "a red fox in snow" --aspect 1:1
     """
     import pathlib
-    import time
-
-    if not prompt.strip():
-        raise SystemExit("pass a --prompt")
 
     started = time.time()
-    out = _run_generate(prompt, aspect, DEFAULT_STEPS, DEFAULT_CFG, 0)
+    out = _render(prompt, aspect, [], DEFAULT_STEPS, 0, transparent)
 
     out_dir = pathlib.Path("outputs")
     out_dir.mkdir(exist_ok=True)
@@ -920,14 +792,46 @@ def smoke_generate(
     print(
         f"generated {target} in {out['seconds']}s "
         f"({out['steps']} steps, {out['size'][0]}x{out['size'][1]}, {aspect}), "
-        f"{time.time() - started:.1f}s wall"
+        f"alpha={out['transparent']}, {time.time() - started:.1f}s wall"
     )
+
+
+@app.local_entrypoint()
+def selftest(image: str = "inputs/ref.png") -> None:
+    """Every path in one container: generate, generate + alpha, edit.
+
+    Three renders, one cold start. This is the check that a change to the request
+    shape, the LoRA or the alpha handling did not break one branch while the others
+    kept working - the smoke entry points each exercise only one.
+
+        uv run --package modal-app modal run modal_app/src/modal_app/app.py::selftest
+    """
+    import pathlib
+
+    out_dir = pathlib.Path("outputs")
+    out_dir.mkdir(exist_ok=True)
+    source = pathlib.Path(image).read_bytes()
+
+    runs = [
+        ("generate-wide", "a red fox in fresh snow, cinematic", "16:9", [], False),
+        ("generate-alpha", "a cute cartoon dragon sticker", "1:1", [], True),
+        ("edit", "turn the background into a sunset beach", DEFAULT_ASPECT, [source], False),
+    ]
+    for name, prompt, aspect, images, transparent in runs:
+        out = _render(prompt, aspect, images, DEFAULT_STEPS, 1, transparent)
+        target = out_dir / f"selftest-{name}.png"
+        target.write_bytes(out["png"])
+        print(
+            f"{name}: {out['seconds']}s {out['size']} alpha={out['transparent']} "
+            f"-> {target} ({len(out['png']) // 1024} KB)"
+        )
 
 
 @app.local_entrypoint()
 def smoke(
     prompt: str = "Make the scene at night with warm street lights",
     image: str = "",
+    transparent: bool = True,
 ) -> None:
     """One real edit on the deployed GPU class. No HTTP and no auth in the way.
 
@@ -951,7 +855,9 @@ def smoke(
     if not image_path.is_file():
         raise SystemExit(f"not a file: {image_path}")
 
-    out = _run_edit([image_path.read_bytes()], prompt, DEFAULT_STEPS, DEFAULT_CFG, 0)
+    out = _render(
+        prompt, DEFAULT_ASPECT, [image_path.read_bytes()], DEFAULT_STEPS, 0, transparent
+    )
 
     out_dir = pathlib.Path("outputs")
     out_dir.mkdir(exist_ok=True)
@@ -959,5 +865,6 @@ def smoke(
     target.write_bytes(out["png"])
     print(
         f"edited {image_path} -> {target} in {out['seconds']}s "
-        f"({out['steps']} steps, {out['size'][0]}x{out['size'][1]})"
+        f"({out['steps']} steps, {out['size'][0]}x{out['size'][1]}), "
+        f"alpha={out['transparent']}"
     )

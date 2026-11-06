@@ -1,4 +1,4 @@
-"""Modal app for hosting Qwen-Image-Edit-2511.
+"""Modal app for hosting Qwen-Image-2.1.
 
 The runnable Modal app lives in :mod:`modal_app.app`.
 """
