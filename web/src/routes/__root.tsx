@@ -5,6 +5,7 @@ import { TanStackDevtools } from '@tanstack/react-devtools'
 import { useEffect } from 'react'
 import Header from '../components/Header'
 import Toaster from '../components/Toaster'
+import { BRAND, SOCIAL_IMAGE, SOCIAL_IMAGE_ALT } from '../lib/brand'
 import { pushToast } from '../lib/toast'
 
 import appCss from '../styles.css?url'
@@ -38,7 +39,7 @@ function NotFound() {
     <main className="stage">
       <section className="empty">
         <h1>Nothing here</h1>
-        <p>That page does not exist. The editor is on the home page.</p>
+        <p>That page does not exist. The studio is on the home page.</p>
         <div className="row">
           <a href="/" className="btn">
             Open the editor
@@ -57,19 +58,38 @@ export const Route = createRootRoute({
         name: 'viewport',
         content: 'width=device-width, initial-scale=1, viewport-fit=cover',
       },
-      {
-        name: 'description',
-        content:
-          'Edit a photo by describing the change. Runs on a GPU on demand, and images are never stored.',
-      },
-      {
-        name: 'theme-color',
-        content: '#0a0b0d',
-        media: '(prefers-color-scheme: dark)',
-      },
-      { title: 'Image Editor' },
+      { title: BRAND.title },
+      { name: 'description', content: BRAND.description },
+      // theme-color lives in the shell, not here: two entries share one `name`,
+      // so the head de-duplicates them and keeps only the last — which painted
+      // light chrome over the dark theme.
+
+      // Open Graph. Without these a shared link shows a bare URL: X, Slack and
+      // iMessage all read these tags and none of them guess.
+      { property: 'og:type', content: 'website' },
+      { property: 'og:site_name', content: BRAND.name },
+      { property: 'og:title', content: BRAND.title },
+      { property: 'og:description', content: BRAND.description },
+      { property: 'og:url', content: BRAND.url },
+      // Absolute on purpose: scrapers do not resolve relative image paths.
+      { property: 'og:image', content: SOCIAL_IMAGE },
+      { property: 'og:image:type', content: 'image/png' },
+      { property: 'og:image:width', content: '1200' },
+      { property: 'og:image:height', content: '630' },
+      { property: 'og:image:alt', content: SOCIAL_IMAGE_ALT },
+
+      // Twitter/X falls back to og:* but a large card needs saying out loud.
+      { name: 'twitter:card', content: 'summary_large_image' },
+      { name: 'twitter:title', content: BRAND.title },
+      { name: 'twitter:description', content: BRAND.description },
+      { name: 'twitter:image', content: SOCIAL_IMAGE },
+      { name: 'twitter:image:alt', content: SOCIAL_IMAGE_ALT },
     ],
-    links: [{ rel: 'stylesheet', href: appCss }],
+    links: [
+      { rel: 'stylesheet', href: appCss },
+      { rel: 'canonical', href: BRAND.url },
+      { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
+    ],
   }),
   shellComponent: RootDocument,
   errorComponent: RootError,
@@ -81,6 +101,16 @@ function RootDocument({ children }: { children: React.ReactNode }) {
     <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+        <meta
+          name="theme-color"
+          content="#0a0b0d"
+          media="(prefers-color-scheme: dark)"
+        />
+        <meta
+          name="theme-color"
+          content="#fafafa"
+          media="(prefers-color-scheme: light)"
+        />
         <HeadContent />
       </head>
       <body>

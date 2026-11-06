@@ -1,5 +1,6 @@
 import CreditChip from './CreditChip'
 import ThemeToggle from './ThemeToggle'
+import { BRAND } from '../lib/brand'
 
 /**
  * Chrome, floated over the canvas rather than given a bar of its own.
@@ -13,7 +14,7 @@ export default function Header() {
     <div className="top">
       <div className="brand">
         <i aria-hidden="true" />
-        image editor
+        {BRAND.wordmark}
       </div>
       <div className="top-right">
         <CreditChip />
