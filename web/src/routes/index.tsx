@@ -784,6 +784,8 @@ function App() {
       setErrorText('')
       setStatus('running')
       const found = await collect(job.id, job.mode, pendingRun)
+      // Recovered or not, that prompt has been sent — leave the field empty.
+      if (found) setPrompt('')
       if (!found && runId.current === pendingRun) {
         setStatus('idle')
         pushToast('info', 'That render is no longer available.')
@@ -808,6 +810,9 @@ function App() {
     setLastPrompt(instruction)
     setLastMode(mode)
     setStatus('running')
+    // The prompt is echoed above the result, so the field is free as soon as it
+    // is sent — and the next thought can be typed without clearing anything.
+    setPrompt('')
 
     try {
       const out =
@@ -842,6 +847,7 @@ function App() {
 
         const message =
           out.error ?? 'The edit did not finish. Try again in a moment.'
+        setPrompt(instruction)
         pushToast('error', message)
         setErrorText(message)
         setStatus('error')
@@ -858,6 +864,7 @@ function App() {
 
       const message =
         err instanceof Error ? err.message : 'The edit did not finish.'
+      setPrompt(instruction)
       const friendly = /fetch|network|load failed/i.test(message)
         ? 'Could not reach the editor. Try again in a moment.'
         : message
