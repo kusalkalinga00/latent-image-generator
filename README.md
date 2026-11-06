@@ -46,7 +46,7 @@ Every picture here is the real app on the live URL — no mockups.
 2. [What a user sees](#what-a-user-sees)
 3. [Architecture](#architecture)
 4. [Request lifecycle](#request-lifecycle)
-5. [The two models](#the-two-models)
+5. [The model](#the-model)
 6. [Repository layout](#repository-layout)
 7. [The web app](#the-web-app)
 8. [The Modal service](#the-modal-service)
@@ -77,9 +77,9 @@ The instruction is echoed as a chat bubble above the result, because the thing o
 answer to the sentence you typed — and after a cold start of 40-plus seconds, being able to see
 what you asked for is what tells you the wait was worth it.
 
-The cutout is decided by the **prompt**, not by a switch. A prompt that says "transparent
+Transparency is decided by the **prompt**, not by a switch. A prompt that says "transparent
 background" — or cut-out, no background, remove the background, isolated on white, with alpha —
-turns the cutout on by itself, and the footer says so before you send. The checkerboard icon in
+turns it on by itself, and the footer says so before you send. The checkerboard icon in
 the composer still overrides that for the session, and reloading returns to auto, so no stale
 choice can quietly defeat a later prompt.
 

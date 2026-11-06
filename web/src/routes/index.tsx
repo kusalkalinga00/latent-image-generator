@@ -21,7 +21,11 @@ export const Route = createFileRoute('/')({ component: App })
 
 const MAX_IMAGES = 4
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
-const MAX_EDGE = 1536 // the model works around 1MP; larger just costs GPU seconds
+const MAX_EDGE = 1536 // the model works around 1.5MP; larger just costs GPU seconds
+// Vercel rejects a serverless request body over 4.5MB with a 413 before the code
+// runs. Base64 inflates an image by 4/3, so the encoded string has to stay under
+// this, with room for the JSON around it.
+const MAX_ATTACHMENT_CHARS = 3_400_000
 
 // The backend holds one model - Qwen-Image-2.1 with the 4-step Lightning LoRA - and
 // it does both generation and editing. There is no second "standard" path to switch
@@ -300,11 +304,28 @@ interface Attachment {
 }
 
 /**
+ * Encode a canvas small enough to survive the trip to the server.
+ *
+ * WebP first: it keeps the alpha channel and comes back roughly a tenth the size
+ * of a PNG for photographic output — a 1312px render is 3.7MB as PNG and 359KB as
+ * WebP. Browsers that will not encode it fall back to PNG.
+ */
+function encodeCanvas(canvas: HTMLCanvasElement): string {
+  const webp = canvas.toDataURL('image/webp', 0.92)
+  if (webp.startsWith('data:image/webp')) return webp
+  return canvas.toDataURL('image/png')
+}
+
+/**
  * Downscale in the browser before upload.
  *
- * Two practical reasons: the model was trained around 1MP so extra resolution buys
- * nothing but GPU seconds, and Vercel Functions cap request bodies at about 4.5MB
- * which a modern phone photo plus base64 overhead will exceed.
+ * Three practical reasons, and the third one only became true when the model
+ * changed: the model works around 1.5MP so extra resolution buys nothing but GPU
+ * seconds; Vercel Functions cap a request body at **4.5MB**; and the transparent,
+ * higher-detail PNGs Qwen-Image-2.1 returns are large enough to hit that cap on
+ * their own. Editing a generated result sent 4.89MB of base64 and was rejected with
+ * a 413 before the server function ever ran — which the app could only report as
+ * "the edit did not finish". So the encoded size is enforced here, not assumed.
  */
 async function prepareImage(file: File): Promise<Attachment> {
   if (file.size > MAX_UPLOAD_BYTES) {
@@ -321,18 +342,35 @@ async function prepareImage(file: File): Promise<Attachment> {
   }
 
   const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height))
-  const width = Math.max(1, Math.round(bitmap.width * scale))
-  const height = Math.max(1, Math.round(bitmap.height * scale))
+  let width = Math.max(1, Math.round(bitmap.width * scale))
+  let height = Math.max(1, Math.round(bitmap.height * scale))
 
   const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
   const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Could not process that image in this browser')
-  ctx.drawImage(bitmap, 0, 0, width, height)
+  if (!ctx) {
+    bitmap.close()
+    throw new Error('Could not process that image in this browser')
+  }
+
+  let dataUrl = ''
+  for (let attempt = 0; ; attempt += 1) {
+    canvas.width = width
+    canvas.height = height
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    dataUrl = encodeCanvas(canvas)
+    const chars = dataUrl.length - dataUrl.indexOf(',') - 1
+    if (chars <= MAX_ATTACHMENT_CHARS) break
+    if (attempt >= 5) {
+      bitmap.close()
+      throw new Error(
+        `${file.name} is too detailed to send. Try a smaller image.`,
+      )
+    }
+    width = Math.max(1, Math.round(width * 0.8))
+    height = Math.max(1, Math.round(height * 0.8))
+  }
   bitmap.close()
 
-  const dataUrl = canvas.toDataURL('image/png')
   const base64 = dataUrl.split(',')[1] ?? ''
   if (!base64) throw new Error(`${file.name} could not be prepared.`)
 
