@@ -279,6 +279,25 @@ function ShapeGlyph({ aspect }: { aspect: Aspect }) {
 }
 
 /**
+ * Is this the one platform where a web page cannot save a file by itself?
+ *
+ * iOS Safari ignores `<a download>` on a data: URL — the tap is a no-op — so the
+ * share sheet is the only route from a page to Photos, and it only opens from
+ * inside the tap gesture.
+ *
+ * Everywhere else the share sheet is the *wrong* answer, which is what made
+ * "Download" look broken on a Mac: `navigator.canShare({ files })` is true in
+ * desktop Chrome and Safari too, so the button opened a menu of AirDrop, Messages
+ * and Notes instead of saving anything. The capability test never distinguished
+ * "can share" from "must share".
+ */
+function needsShareSheet(): boolean {
+  if (/iP(hone|ad|od)/.test(navigator.userAgent)) return true
+  // iPadOS 13+ reports itself as a Mac; the touch count is what gives it away.
+  return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1
+}
+
+/**
  * A data: URL as a File, decoded synchronously.
  *
  * `navigator.share()` has to be called while the tap gesture is still live, so the
@@ -973,14 +992,13 @@ function App() {
     if (!resultUrl) return
     const name = `${resultAlpha ? 'transparent' : 'edited'}-${Date.now()}.png`
 
-    // iOS Safari ignores `download` on a data: URL. The click does nothing, so the
-    // toast used to be the only thing that happened. The share sheet is the only
-    // route from a web page to Photos, and iOS only opens it from inside the tap
-    // gesture — hence the synchronous decode, before any await.
+    // Decoded synchronously so the iOS branch below can still call share() inside
+    // the tap gesture; elsewhere it doubles as the Blob behind the download.
     const file = dataUrlToFile(resultUrl, name)
 
     if (
       file &&
+      needsShareSheet() &&
       typeof navigator.canShare === 'function' &&
       navigator.canShare({ files: [file] })
     ) {
@@ -1003,13 +1021,20 @@ function App() {
       return
     }
 
+    // An object URL, not the data: URL. Safari has ignored `download` on data: URLs
+    // long enough that relying on it is a coin flip, and a Blob URL is what every
+    // browser treats as an ordinary file.
+    const href = file ? URL.createObjectURL(file) : resultUrl
     const a = document.createElement('a')
-    a.href = resultUrl
+    a.href = href
     a.download = name
     a.rel = 'noopener'
     document.body.appendChild(a)
     a.click()
     a.remove()
+    // Revoking immediately can cancel the save in some browsers; a few seconds is
+    // long enough for the download to have started reading.
+    if (file) setTimeout(() => URL.revokeObjectURL(href), 10_000)
     pushToast('success', 'Download started.')
   }
 
