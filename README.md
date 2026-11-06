@@ -109,16 +109,13 @@ flowchart TB
     API["POST api()<br/>route by payload<br/>store by job id"]
     RES["GET result?job_id<br/>hand back a finished render"]
     USE["GET usage()<br/>billing summary"]
-    subgraph EDITOR["Editor · class"]
-      ED["Qwen-Image-Edit-2511<br/>+ 4-step Lightning LoRA<br/>H100 80 GB"]
+    subgraph ONE["Image21 · one class"]
+      M21["Qwen-Image-2.1<br/>+ 4-step Lightning LoRA<br/>H100 80 GB · 44 GB peak"]
     end
-    subgraph PAINTER["Painter · class"]
-      PN["Qwen-Image-2512<br/>+ 4-step Lightning LoRA<br/>H100 80 GB"]
-    end
-    MAT["matting.py · CPU container<br/>geometric key or u2net"]
+    ALPHA["alpha clamp · CPU<br/>1-7/255 → 0"]
   end
 
-  VOL[("Volume<br/>image-editor-weights<br/>2 × ~54 GiB")]
+  VOL[("Volume<br/>qwen21-weights<br/>33.1 GiB")]
   RVOL[("Volume<br/>image-editor-results<br/>45 minute TTL")]
 
   UI -->|"prompt + optional photo + job id"| FN
@@ -131,14 +128,12 @@ flowchart TB
   FN ==>|"HTTPS + Bearer"| API
   CO ==>|"HTTPS + Bearer"| RES
   CR ==>|"HTTPS + Bearer"| USE
-  API -->|"image_b64 present → edit"| ED
-  API -->|"no image_b64 → generate"| PN
+  API -->|"image_b64 present → edit"| M21
+  API -->|"no image_b64 → generate"| M21
   API -.->|"writes the finished PNG"| RVOL
   RES -.->|"reads it back"| RVOL
-  ED --> MAT
-  PN --> MAT
-  ED -.->|"loads weights"| VOL
-  PN -.->|"loads weights"| VOL
+  M21 -.->|"transparent job: RGBA out"| ALPHA
+  M21 -.->|"loads weights"| VOL
 ```
 
 Three endpoints, not one, and each earns its place: `api` does the work, `result` hands back
@@ -162,11 +157,16 @@ client chose, and the finished image is stored under it before the response goes
 one small write and buys the only sane answer to a phone that locks mid-render: the work is
 already paid for, so it is collectable rather than repeatable.
 
-**Two model containers, not one.** Each checkpoint is a 20 B MMDiT (38.05 GiB) plus a
-Qwen2.5-VL text encoder (15.45 GiB) — 53.7 GiB apiece, download sizes verified against the HF
-API. Together that is ~108 GiB against 80 GB of VRAM, so they cannot share a process. Two `@modal.cls` classes means two cold starts — but each
-container only ever holds the model it is working with, and `max_containers=1` per class keeps
-the ceiling at two cards instead of unbounded.
+**One model, one container.** Qwen-Image-2.1 is a single 7 B model — 33.1 GiB in the Volume,
+44 GB peak VRAM at the sizes this app serves — that both edits and generates. An earlier build
+ran two checkpoints, Edit-2511 and 2512, because 53.7 GiB apiece against 80 GB of VRAM meant they
+could not share a process; that cost a second cold start and a second 54 GiB load on every switch
+between editing and generating. One class removes both, and `max_containers=1` caps the bill at
+one H100 however many people use it at once.
+
+The same simplification removed the matting step. The old checkpoints were RGB-only, so
+"transparent background" was a *painted pattern*, and alpha had to be cut out afterwards by a CPU
+container running a geometric key or u2net. 2.1 emits RGBA itself; what is left is a clamp.
 
 ---
 
@@ -190,12 +190,12 @@ sequenceDiagram
   F->>A: POST api()
   A->>A: image present ? edit : generate
   opt container is asleep
-    A->>G: cold start, 54 GiB to load, 30-70 s
+    A->>G: cold start, 33.1 GiB to load, ~19 s
   end
   A->>G: 4 denoise steps
-  G-->>A: a PNG
+  G-->>A: an (R)GBA PNG
   opt transparency was asked for
-    A->>A: cut the background out, on CPU
+    A->>A: clamp alpha under 8/255 to 0, on CPU
   end
   A->>R: store the payload under the job id
   alt the reply gets through
@@ -275,36 +275,53 @@ attempt is therefore guarded — one dead lookup is not a verdict.
 
 ---
 
-## The two models
+## The model
 
-| | Edit | Generate |
-|---|---|---|
-| Checkpoint | `Qwen/Qwen-Image-Edit-2511` | `Qwen/Qwen-Image-2512` |
-| Size on disk | 53.76 GiB (38.05 transformer + 15.45 text encoder) | 53.74 GiB (same split) |
-| LoRA | `lightx2v/Qwen-Image-Edit-2511-Lightning`, 4-step, bf16 | `lightx2v/Qwen-Image-2512-Lightning`, 4-step, bf16 |
-| Steps at runtime | 4 | 4 |
-| Guidance | none (distilled); `1.0` only above 4 steps | same |
-| Negative prompt | `" "` (a single space) | 2512's own quality-negative, Chinese, shipped with the model |
-| Output size | inherits the input | trained buckets: 1328², 1584×1056, 1056×1584, 1664×928, 928×1664, 1472×1104, 1104×1472 |
-| Licence | Apache 2.0 | Apache 2.0 |
+| | |
+|---|---|
+| Checkpoint | `Qwen/Qwen-Image-2.1` — 7 B parameters, 32 single-stream DiT layers |
+| Size in the Volume | 33.1 GiB (33.29 GB, 198 files, measured) |
+| LoRA | `lightx2v/Qwen-Image-2.1-Lightning` — 4-step distillation, 64 MB bf16 |
+| Jobs | generation **and** editing, from one set of weights |
+| Steps at runtime | 4, always |
+| Guidance | `true_cfg_scale=1.0` — guidance-free, which is how the distillation was trained |
+| Alpha | native RGBA out; the background sits at 1-7/255 and is clamped to 0 |
+| Output size | 1312², 1536×1024, 1024×1536, 1408×1056, 1056×1408, 1664×928, 928×1664 |
+| Peak VRAM | 44.1 GB at 1312², 60.7 GB at 2048² (measured) |
+| Speed | 3.2-3.8 s for 4 steps; 19.3 s to load the weights cold |
+| Licence | Apache 2.0 |
 
 All weights are downloaded once into a Modal Volume and read from there on every cold start. No
-model file ever touches a developer machine, and there is no Hugging Face token because neither
-repo is gated.
+model file ever touches a developer machine, and there is no Hugging Face token because the repo
+is not gated.
+
+**Every output side is a multiple of 32.** The pipeline works on a 32-pixel latent grid and
+*silently* snaps what it is given — 1328 came back as 1312 — so the request would disagree with
+the reported size and the aspect would drift off its intended ratio. The buckets above are the
+trained 1:1 / 3:2 / 4:3 / 16:9 shapes at roughly 1.5 MP rather than the card's 2048-px family:
+the image still fills a phone's screen, and the PNG stays a couple of megabytes instead of six.
 
 ### The scheduler is the thing that decides good output from garbage
 
 A Lightning LoRA is a distillation, and a distillation carries an implicit noise schedule. The
-LoRA file does not contain it. Both pipelines therefore get a **rebuilt**
-`FlowMatchEulerDiscreteScheduler` with `base_shift` and `max_shift` both `math.log(3)`
-(the training used `shift=3`), `shift_terminal=None`, `stochastic_sampling=False`,
-`use_dynamic_shifting=True`.
+LoRA file does not contain it. The pipeline therefore gets a **rebuilt**
+`FlowMatchEulerDiscreteScheduler` — exponential shifting, `base_shift=0.5`, `max_shift=0.9`,
+`base_image_seq_len=256`, `max_image_seq_len=8192` — plus the four sigmas the distillation was
+trained at, `[1.0, 0.75, 0.5, 0.25]`, passed per call.
+
+Two details that are easy to get wrong, and both were verified against the published model rather
+than guessed:
+
+- **These are not the 2511 numbers.** The previous LoRA used `math.log(3)` for both shifts; 2.1
+  uses `0.5` and `0.9`. Copying the old config across produces plausible-looking images with a
+  faint grid.
+- **The sigmas matter as much as the scheduler.** `num_inference_steps=4` alone lets the pipeline
+  derive its own sigmas; passing the distilled ones is what makes four steps enough.
 
 Attaching the LoRA to the pipeline's *default* scheduler is the mistake the Lightning repo
-documents as grid artifacts: a faint grid over an otherwise plausible image. That is exactly the
-kind of failure that survives a quick glance, so the config is a single constant
-(`LIGHTNING_SCHEDULER_CONFIG`) used by both classes, and `check_env` builds it on a CPU
-container to prove it parses before any GPU is rented.
+documents as grid artifacts. The config is a single constant (`LIGHTNING_SCHEDULER_CONFIG`),
+applied in one place, and `check_env` builds it on a CPU container to prove it parses before any
+GPU is rented.
 
 ---
 
@@ -333,8 +350,7 @@ image-editor/
 │
 ├── modal_app/
 │   └── src/modal_app/
-│       ├── app.py                the GPU service: 2 classes, 2 endpoints, helpers
-│       └── matting.py            RGB → RGBA: geometric key, or u2net for photos
+│       └── app.py                the GPU service: one class, three endpoints, helpers
 │
 ├── scripts/edit.py               CLI client for the deployed endpoint
 ├── docs/COST.md                  the longer cost argument
@@ -356,7 +372,7 @@ product is one screen.
 `src/lib/edit.ts` is the only module that knows Modal exists. It exports three server functions:
 
 ```ts
-editImage({ imagesBase64, prompt, steps, seed, jobId })      // requires 1–3 images
+editImage({ imagesBase64, prompt, steps, seed, jobId })      // requires 1–4 images
 generateImage({ prompt, steps, seed, aspect, jobId })        // no images
 collectResult({ jobId })                                     // what a lost reply owes you
 ```
@@ -428,18 +444,17 @@ resolved theme.
 
 | Object | Kind | GPU | Purpose |
 |---|---|---|---|
-| `api` | FastAPI endpoint (POST) | no | Routes a request to the right class by payload, stores the result by job id |
+| `api` | FastAPI endpoint (POST) | no | Routes by payload (photo → edit, none → generate), stores the result by job id |
 | `result` | FastAPI endpoint (GET) | no | Hands a finished render back by job id — the lock-and-sleep path |
 | `usage` | FastAPI endpoint (GET) | no | Remaining credit for the header chip |
-| `Editor` | `@modal.cls` | H100 | `edit(images, prompt, steps, cfg, seed)` |
-| `Painter` | `@modal.cls` | H100 | `generate(prompt, aspect, steps, cfg, seed)` |
+| `Image21` | `@modal.cls` | H100 | `render(prompt, aspect, images?, transparent, seed)` — both jobs |
 | `check_env` | function | no | Proves the dependency set loads before renting a GPU |
-| `download_weights` | function | no | Edit checkpoint + LoRA into the Volume |
-| `download_t2i` | function | no | Generate checkpoint + LoRA into the Volume |
+| `download_weights` | function | no | Checkpoint + LoRA into the Volume |
 | `volume_stats` | function | no | What is actually in the Volume |
+| `selftest` | local entrypoint | — | All three paths in one container |
 | `smoke` / `smoke_generate` | local entrypoints | — | One real run each, no HTTP or auth in the way |
 
-All three endpoints are `requires_proxy_auth=True`. Both classes are `max_containers=1`,
+All three endpoints are `requires_proxy_auth=True`. The class is `max_containers=1`,
 `scaledown_window=60`, `timeout=1200`.
 
 ### One endpoint, two jobs
@@ -457,18 +472,18 @@ Content-Type: application/json
 {
   "ok": true,
   "mode": "edit" | "generate",
-  "model": "Qwen/Qwen-Image-Edit-2511",
+  "model": "Qwen/Qwen-Image-2.1",
   "transparent": false,
   "image_b64": "iVBOR...",
   "seconds": 3.61,
   "steps": 4,
-  "size": [896, 1184]
+  "size": [1024, 1024]
 }
 ```
 
-`transparent` reflects what actually happened, not what was asked: if the cutout fails the field
-is `false` and the image is returned intact, because losing a render the user waited for is worse
-than returning one without alpha.
+`transparent` reflects what actually happened, not what was asked: if no usable alpha comes back
+the field is `false` and the image is returned intact, because losing a render the user waited for
+is worse than returning one without alpha.
 
 The mode is decided by **whether `image_b64` arrived**, not by a flag. That keeps the rule in one
 place: the client cannot ask for a generate while sending a photo, and the API function is the
@@ -478,51 +493,50 @@ Failures are JSON with `ok: false` and a one-line `error`, never an opaque 500 �
 distinguishes "your token is wrong" (HTTP 401 from proxy auth) from "the model failed" (200 with
 `ok: false`) by shape alone.
 
-### Transparency is post-processing, not generation
+### Transparency is generation, not post-processing
 
-The models are RGB. Asked for a "transparent background", Qwen paints a **grey checkerboard** —
-that is the visual idiom it learned, not an alpha channel — and the pipeline would save RGB in any
-case. So the request carries `transparent: true` and the API function cuts the background out
-after the render, on CPU, which costs nothing next to a GPU second.
+This is the difference the 2.1 migration bought. The old checkpoints were RGB: asked for a
+"transparent background", they painted a **grey checkerboard** — the visual idiom they learned,
+not an alpha channel — so alpha had to be cut out afterwards, on CPU, by a module with two
+methods (a geometric key for flat art, a u2net matte for photos), a pixel of erosion to kill the
+grey fringe, a curve to un-soften the mask, and 176 MB of extra weights in the container.
 
-`matting.py` has two methods and picks one:
+2.1 emits RGBA itself, when asked in the phrasing it was trained on:
 
-| Method | When | Why |
-|---|---|---|
-| Geometric key | flat illustration on a flat field | an exact mask: hard edges, every detail kept. This is most of what people want a cutout for |
-| Model matte (u2net) | photographs and busy backgrounds | a key has nothing to hold on to |
-
-Both are finished the same way: one pixel of erosion (the checkerboard is anti-aliased into the
-subject's outline, and without that the cutout keeps a grey fringe on a light page) and a half
-pixel of feather. The u2net mask is soft — an interior at alpha 254 is technically translucent —
-so it is pushed through a curve first to make solid pixels solid.
-
-`check_matting` proves the whole path on a synthetic red square, on CPU, for cents:
-
-```sh
-uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_matting
+```text
+This is an RGBA image with transparency. {your prompt} The image has alpha channel
+and the background is transparent.
 ```
 
-### Loading order inside a class
+The result is a real alpha channel, so what is left is arithmetic on one channel:
 
-Both classes do the same four things in the same order, because the order is part of the
-correctness:
+| Step | Why |
+|---|---|
+| `alpha < 8 → 0` | the background comes back at 1–7/255, not 0: invisible on screen, a colour fringe once composited |
+| flatten onto white otherwise | the pipeline returns RGBA even when nobody asked, and the UI draws a checkerboard wherever alpha exists |
 
-1. build the transformer from the checkpoint (`QwenImageTransformer2DModel`, bf16),
-2. build the distillation scheduler,
-3. construct the pipeline with both,
-4. **then** `load_lora_weights()`, then `.to("cuda")`.
+`_useful_alpha()` answers the honest question — did an alpha channel actually arrive — and the
+`transparent` field reports that, not the request.
 
-The load time is logged (`pipeline + 4-step LoRA on GPU in Ns`) so the cold-start share of a bill
-is measurable rather than remembered.
+### Loading order
+
+1. `QwenImage21Pipeline.from_pretrained(..., bf16)`,
+2. `load_lora_weights(<lightning>, adapter_name="lightning")`,
+3. **then** replace the scheduler with the distillation config,
+4. `.to("cuda")`.
+
+The LoRA goes on before the scheduler swap because `load_lora_weights` reads the pipeline's
+existing scheduler config as its base; the order the Lightning reference uses. The load time is
+logged (`2.1 + 4-step LoRA on GPU in Ns`) so the cold-start share of a bill is measurable rather
+than remembered.
 
 ---
 
 ## Cost model
 
 Modal bills per second of a live container. H100 SXM5 is **$0.001097/s** ($3.95/hr). Storage is
-free inside the 1 TiB allowance, so neither Volume appears in the bill: the two checkpoints are
-93.4 GiB and a stored render is 1–3 MB, pruned after 45 minutes. The recovery lookup itself is a
+free inside the 1 TiB allowance, so neither Volume appears in the bill: the checkpoint is 33.1 GiB
+and a stored render is 1–3 MB, pruned after 45 minutes. The recovery lookup itself is a
 CPU container that never starts a GPU, which is the whole reason it is the cheap half of the
 problem.
 
@@ -536,26 +550,29 @@ not an optimisation, it is the difference between 286 edits a month and 3,300.
 
 | | Work | + idle tail | Cost, isolated |
 |---|---|---|---|
-| Edit, warm | 3.6–5.3 s | 64 s | ~$0.07 |
-| Edit, cold | 31.7 s load + edit | 95 s | ~$0.105 |
-| Generate, warm | 3.3–3.9 s | 64 s | ~$0.07 |
-| Generate, cold | 76.8 s wall, 3.9 s of it denoise | 134 s | ~$0.147 |
+| Render, warm | 3.2–3.8 s | 63–64 s | ~$0.070 |
+| Render, cold | 19.3 s load + 3.7 s | 83 s | ~$0.091 |
+| Edit and then generate | one cold start, both renders | 86 s | ~$0.095 |
 
-The first inference on a freshly loaded container is slower than the steady state (5.29 s versus
-3.61 s for the same edit) because of kernel warm-up; both numbers are real, and the README quotes
-the steady state for throughput and the first-run figure for what a user actually waits.
+Editing and generating now share a container, so switching between them no longer pays a second
+cold start — the case that used to cost ~$0.15 and two 54 GiB loads costs one load and 3.7 s more.
+
+The first inference on a freshly loaded container is slower than the steady state because of
+kernel warm-up; the table quotes the steady state, and `selftest` reports what a first run really
+takes.
 
 ### What $30/month buys
 
-| Pattern | Edits | Generations |
-|---|---|---|
-| Every request isolated (cold start each) | ~286 | ~204 |
-| Batches of 5 in one sitting | ~1,240 | ~910 |
-| Batches of 20 in one sitting | ~3,330 | ~2,600 |
-| Marginal cost of one more, GPU already warm | **$0.004 → ~7,500** | **$0.0043 → ~7,000** |
+| Pattern | Renders |
+|---|---|
+| Every request isolated (cold start each) | ~329 |
+| Batches of 5 in one sitting | ~1,395 |
+| Batches of 20 in one sitting | ~3,540 |
+| Marginal cost of one more, GPU already warm | **$0.0041 → ~7,330** |
 
-The header chip shows the last row — the optimistic bound, because it assumes the GPU is already
-warm. The honest planning numbers are the batch rows. `docs/COST.md` carries the longer argument.
+One model halves the number of things that can be cold: there is no case where an edit warms one
+container and a generate needs another. The header chip shows the last row — the optimistic bound,
+because it assumes the GPU is already warm. The honest planning numbers are the batch rows. `docs/COST.md` carries the longer argument.
 
 ### What would blow the budget
 
@@ -599,19 +616,23 @@ and constructs the distillation scheduler. Everything it checks has failed at le
 every one of those failures only surfaced on a GPU. Run it before every deploy that touches the
 image.
 
-### 3. Pull the weights into the Volume (once, ~93 GiB total)
+### 3. Pull the weights into the Volume (once, 33.1 GiB)
 
 ```sh
-uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights   # edit
-uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_t2i       # generate
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::download_weights
 uv run --package modal-app modal run modal_app/src/modal_app/app.py::volume_stats
 ```
 
-Two checkpoints of ~54 GiB each, so ~108 GiB. Storage is free under 1 TiB, so this costs $0/month.
-(`volume_stats` skips symlinks so it does not double-count a Hugging Face cache, which means it
-reports less than the model sizes add up to — the figure to budget with is the one above.) Both functions `commit()` the Volume —
-without that the writes vanish when the container exits and every cold start re-downloads
-everything.
+One checkpoint plus its 64 MB LoRA. Storage is free under 1 TiB, so this costs $0/month.
+`volume_stats` skips symlinks so it does not double-count a Hugging Face cache; the figure it
+prints (33.1 GiB, 198 files) is the one to budget with.
+
+Xet is disabled on this image (`HF_HUB_DISABLE_XET=1`) for a reason worth keeping: Hugging Face's
+chunked transfer stalled at 28.2 of 33 GiB here and never resumed, while plain HTTP resumes,
+retries, and reports progress. The final 5 GiB took seconds once it was off.
+
+`download_weights` calls `commit()` on the Volume — without that the writes vanish when the
+container exits and every cold start re-downloads everything.
 
 ### 4. Prove both models actually run
 
@@ -706,11 +727,11 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `MODEL_ID` / `T2I_MODEL_ID` | Qwen-Image-Edit-2511 / Qwen-Image-2512 | checkpoints |
-| `DEFAULT_STEPS` | 4 | distilled path |
-| `MAX_STEPS` | 60 | server-side clamp; the UI sends 4 |
-| `MAX_IMAGES` | 3 | reference images per edit |
-| `ASPECTS` | 7 buckets | trained output sizes |
+| `MODEL_ID` | Qwen/Qwen-Image-2.1 | the one checkpoint, for both jobs |
+| `VOLUME_NAME` | qwen21-weights | where its 33.1 GiB lives |
+| `DEFAULT_STEPS` | 4 | distilled path; anything else is ignored |
+| `MAX_IMAGES` | 4 | reference images per edit (2.1 accepts 10; the cap is payload) |
+| `ASPECTS` | 7 buckets, all multiples of 32 | what the pipeline can actually produce |
 | `MAX_EDGE` (web) | 1536 px | client-side downscale before upload |
 | `MAX_UPLOAD_BYTES` (web) | 20 MB | rejected before decode |
 | `RESULTS_TTL_S` | 45 min | how long a finished render can be collected |
@@ -723,15 +744,20 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 |---|---|
 | Do the dependencies import and does the scheduler build? | `modal run …::check_env` |
 | Is the Volume intact? | `modal run …::volume_stats` |
-| Does the edit model produce a sane image? | `modal run …::smoke --image … --prompt …` |
-| Does the generate model? | `modal run …::smoke_generate --prompt …` |
-| Does the transparency path work? | `modal run …::check_matting` |
+| Do all three paths work in one container? | `modal run …::selftest` |
+| Does an edit produce a sane image? | `modal run …::smoke --image … --prompt …` |
+| Does a generation? | `modal run …::smoke_generate --prompt …` |
+| Does transparency really produce alpha? | `modal run …::smoke_generate --transparent true`, then check the PNG's mode |
 | Can a finished render be collected by id? | `POST api` with a `job_id`, then `GET result?job_id=…` |
 | Does an unknown id answer `pending`? | `GET result?job_id=never-sent` |
 | Is the app that is deployed the code I just wrote? | `modal app list`, then compare deploy time |
 
-`smoke` and `smoke_generate` call the **deployed** class through `modal.Cls.from_name`, so they
-test the deployment, not the file on disk.
+`smoke`, `smoke_generate` and `selftest` call the **deployed** class through `modal.Cls.from_name`,
+so they test the deployment, not the file on disk.
+
+`selftest` is the one to run after a change: three renders (generate, generate with alpha, edit)
+in a single container, so one cold start covers all three branches and any one of them breaking
+is visible in one output.
 
 ---
 
@@ -747,8 +773,9 @@ the old image.
 same trap: nothing asks for them at import time, so the image builds clean and the failure lands
 only on a GPU. `check_env` exists to catch exactly this for cents.
 
-**`Unrecognized processing class in Qwen/Qwen-Image-Edit-2511`** — a healthy model. Components
-live in subfolders; the processor needs `subfolder="processor"`.
+**`Unrecognized processing class in Qwen/Qwen-Image-2.1`** — a healthy model. Components live in
+subfolders; the processor needs `subfolder="processor"`. `check_env` tries the subfolder and the
+root, so it reports which one worked rather than crying wolf.
 
 **Faint grid over an otherwise plausible image** — the LoRA is attached to a default scheduler.
 Rebuild it with `LIGHTNING_SCHEDULER_CONFIG`.
@@ -775,20 +802,24 @@ for generations.
 **A cold start slower than it should be may be a crash loop.** Containers that repeatedly fail to
 start still bill. Check `modal app logs` before optimising anything.
 
-**A checkerboard appears in the generated image.** That is the *model* drawing a checkerboard
-because the prompt asked for a transparent background — it is opaque grey pixels, not alpha. Turn
-on the transparency toggle, or ask for "a plain solid white background" and cut it out later.
+**A checkerboard appears painted *into* the image.** That is the old failure, and it should not
+happen any more: 2.1 writes a real alpha channel when asked in its trained phrasing, which
+`_render` supplies. If a checkerboard is visible as pixels, the `transparent` flag never reached
+the backend — check the request body in the server log.
 
-**A generation takes ~77 s the first time and ~4 s after.** Two checkpoints, two containers. Any
-edit → generate switch after the 60 s window pays the full load again. Both classes log their own
-`... on GPU in Ns` line, so the load/work split is checkable in `modal app logs` rather than
-guessed.
+**The reported image size is smaller than the one requested.** The pipeline snaps to a 32-pixel
+grid: 1328 becomes 1312. `ASPECTS` is already on the grid, so this only appears if a size is
+edited by hand.
+
+**A first render takes ~25 s and ~4 s after.** The cold path is 19.3 s of weight loading plus the
+render; both are logged (`2.1 + 4-step LoRA on GPU in Ns`), so the split is checkable in
+`modal app logs` rather than guessed.
 
 ---
 
 ## Known limits
 
-- **`max_containers=1` per class serialises requests.** Two visitors at once means the second
+- **`max_containers=1` serialises requests.** Two visitors at once means the second
   waits with no feedback until Vercel's 300 s cap returns a 504 — while the GPU bills the queue.
 - **Cancel is not cancel.** `Stop waiting` abandons the client-side promise. Modal cannot cancel
   a call already running, so the GPU finishes and bills anyway. The copy says so rather than

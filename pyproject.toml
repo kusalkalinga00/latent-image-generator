@@ -1,7 +1,7 @@
 [project]
 name = "image-editor"
 version = "0.1.0"
-description = "Qwen-Image-Edit-2511 hosted on Modal — private, on-demand, scale-to-zero image editing."
+description = "Qwen-Image-2.1 hosted on Modal — private, on-demand, scale-to-zero image generation and editing."
 readme = "README.md"
 authors = [
     { name = "Kusal", email = "kusalkalingainfo@gmail.com" }

@@ -29,10 +29,10 @@ From Modal's pricing page, per second and per derived hour:
 | Memory | — | $0.008 / GiB |
 | Volume storage | — | $0.09 / GiB-month, **first 1 TiB free** |
 
-The Starter plan includes **$30/month of compute**. Both checkpoints are ~54 GiB
-each (38.05 GiB transformer + 15.45 GiB text encoder), so the Volume holds ~108 GiB
-— still more than an order of magnitude under the free allowance, so it costs
-**$0.00**.
+The Starter plan includes **$30/month of compute**. The single 2.1 checkpoint is
+33.1 GiB, so the Volume holds 33.1 GiB — more than an order of magnitude under the
+free allowance, so it costs **$0.00**. (The previous two-checkpoint build held
+93.4 GiB; the migration freed 60 GiB and removed a Volume entirely.)
 
 ## What $30 buys
 
@@ -49,8 +49,9 @@ personal use, thin for anything shared, which is what sets the design.
 
 ## The three decisions that keep it there
 
-1. **`max_containers=1` per class** — a personal tool must never run two H100s at
-   once. Two concurrent requests would otherwise double a bill silently.
+1. **`max_containers=1`** — a personal tool must never run two H100s at once. Two
+   concurrent requests would otherwise double a bill silently. With one model there
+   is only one class to cap, which is the whole ceiling now.
 2. **`scaledown_window=60`** — release the GPU a minute after the last edit.
 3. **The UI is not in a GPU container.** It is a TanStack Start app on Vercel,
    calling Modal over HTTPS.
@@ -77,45 +78,45 @@ H100, one container, real runs:
 
 | | Work | Container time | Cost |
 |---|---|---|---|
-| Edit, warm, in a batch | 3.6–5.3 s | work only | **$0.004** |
-| Edit, warm, isolated | 3.6–5.3 s | work + 60 s idle | **$0.070** |
-| Edit, cold, isolated | 31.7 s load + work | 95 s | **$0.105** |
-| Generate, warm, in a batch | 3.3–3.9 s | work only | **$0.0043** |
-| Generate, warm, isolated | 3.3–3.9 s | work + 60 s idle | **$0.070** |
-| Generate, cold, isolated | 76.8 s wall (3.9 s denoise) | 134 s | **$0.147** |
+| Render, warm, in a batch | 3.2–3.8 s | work only | **$0.0041** |
+| Render, warm, isolated | 3.2–3.8 s | work + 60 s idle | **$0.070** |
+| Render, cold, isolated | 19.3 s load + 3.7 s | 83 s | **$0.091** |
+| Edit and then generate, one sitting | one load, two renders | 86.6 s | **$0.095** |
 
-Two measurement notes worth keeping:
+Three measurement notes worth keeping:
 
-- **A cold generation costs ~40% more than a cold edit** on the runs measured here
-  (76.8 s wall against ~35 s), even though the two checkpoints are the same size.
-  The load figures in the logs are the ones to trust, not the assumption that a
-  bigger number means a bigger model.
+- **The 2.1 migration cut the cold path roughly in half** — 19.3 s of loading against
+  31.7 s — because the checkpoint is 33.1 GiB instead of 53.7. Cold starts were the
+  largest line item that was not the idle tail.
+- **Editing and generating no longer pay separate cold starts.** Under the old
+  two-checkpoint design that sequence cost about $0.15 and two 54 GiB loads; it now
+  costs one load plus 3.7 s.
 - **The first inference on a fresh container is slower than the steady state**
-  (5.29 s versus 3.61 s for the same edit) because CUDA kernels warm up. Quote the
-  first number for latency, the second for throughput.
+  because CUDA kernels warm up. Quote the first number for latency, the second for
+  throughput.
 
-The `pipeline + 4-step LoRA on GPU in Ns` line is logged on every cold start, so the
-load figure is checkable rather than remembered.
+The `2.1 + 4-step LoRA on GPU in Ns` line is logged on every cold start, so the load
+figure is checkable rather than remembered.
 
 ## What that means per month
 
-| Usage pattern | Edits/month | Generations/month |
-|---|---|---|
-| Every request isolated (cold start each) | ~286 | ~204 |
-| Batches of 5 in one sitting | ~1,240 | ~910 |
-| Batches of 20 in one sitting | ~3,330 | ~2,600 |
-| Marginal cost, GPU already warm | ~7,500 (**$0.004 each**) | ~7,000 (**$0.0043 each**) |
+| Usage pattern | Renders/month |
+|---|---|
+| Every request isolated (cold start each) | ~329 |
+| Batches of 5 in one sitting | ~1,395 |
+| Batches of 20 in one sitting | ~3,540 |
+| Marginal cost, GPU already warm | ~7,330 (**$0.0041 each**) |
 
 The chip in the app shows the last row, because that answers "how many more can I
-do" — but it assumes a warm GPU. Plan with the batch rows. **The gap between 286 and
-3,330 is entirely the 60-second idle tail**, and it is the most useful thing to know
+do" — but it assumes a warm GPU. Plan with the batch rows. **The gap between 329 and
+3,540 is entirely the 60-second idle tail**, and it is the most useful thing to know
 about running this app.
 
 ## What a shared link would cost
 
 There is no rate limit. Ten people making one edit each within a minute is one warm
 container doing ten edits — cheap. The same ten spread over an hour is ten cold
-starts plus ten idle minutes: roughly **$1.05 for ten edits**, and $30 lasts about a
+starts plus ten idle minutes: roughly **$0.91 for ten renders**, and $30 lasts about a
 week of casual sharing.
 
 Before making this public, add a per-IP limit to the server function. Nothing else
@@ -135,7 +136,7 @@ not here.
 |---|---|---|
 | Batch your edits | the idle minute is amortised instead of paid per request | nothing — it is free |
 | `scaledown_window=10` | saves ~$0.05 per isolated request | every revisit pays a cold start |
-| L40S instead of H100 | $1.95/hr vs $3.95 — twice the hours | slower per step; 48 GB needs an FP8 quant |
+| L40S instead of H100 | $1.95/hr vs $3.95 — twice the hours | **not possible at 1312²**: 2.1 peaks at 44.1 GB, and 60.7 GB at 2048², so a 48 GB card OOMs. Needs an FP8 quant to fit |
 | A100 80 GB | $2.50/hr vs $3.95 | ~40% slower than H100 |
 | 8-step LoRAs instead of 4 | — | slower per image, marginally steadier |
 
