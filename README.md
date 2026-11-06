@@ -11,24 +11,52 @@ Both run on demand on an H100 at [Modal](https://modal.com), behind a React app 
 Vercel. Nothing is stored anywhere. The whole thing is designed to survive on the $30/month
 Modal Starter credit, which is the constraint that shaped most of the decisions below.
 
+<p align="center">
+  <img src="docs/screenshots/result-desktop.png" alt="A generated red fox on the desktop app: prompt bubble, result, model name, actions and composer" width="720">
+</p>
+
+---
+
+## Screenshots
+
+Every picture here is the real app on the live URL — no mockups.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/empty.png" alt="The empty state: headline, drop target and composer"><br><sub><b>Empty.</b> One composer, two ways in — type, or drop a photo.</sub></td>
+    <td width="50%"><img src="docs/screenshots/waiting.png" alt="A render in progress: phase, elapsed time, dot field and percentage"><br><sub><b>Waiting.</b> A named phase, elapsed seconds, and dots capped at 92%.</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/result-desktop.png" alt="A result on desktop with download, edit and start over beneath the image" width="720"><br>
+  <sub><b>Result, desktop.</b> Prompt above, model and time beneath.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/result-mobile.jpg" alt="The same result on an iPhone, with the actions as translucent icon buttons on the image" width="300"><br>
+  <sub><b>Result, iPhone.</b> The actions ride on the picture, so a finished image does not push the composer down.</sub>
+</p>
+
 ---
 
 ## Contents
 
-1. [What a user sees](#what-a-user-sees)
-2. [Architecture](#architecture)
-3. [Request lifecycle](#request-lifecycle)
-4. [The two models](#the-two-models)
-5. [Repository layout](#repository-layout)
-6. [The web app](#the-web-app)
-7. [The Modal service](#the-modal-service)
-8. [Cost model](#cost-model)
-9. [Setup from zero](#setup-from-zero)
-10. [Configuration reference](#configuration-reference)
-11. [Verifying a deployment](#verifying-a-deployment)
-12. [Troubleshooting](#troubleshooting)
-13. [Known limits](#known-limits)
-14. [Licence](#licence)
+1. [Screenshots](#screenshots)
+2. [What a user sees](#what-a-user-sees)
+3. [Architecture](#architecture)
+4. [Request lifecycle](#request-lifecycle)
+5. [The two models](#the-two-models)
+6. [Repository layout](#repository-layout)
+7. [The web app](#the-web-app)
+8. [The Modal service](#the-modal-service)
+9. [Cost model](#cost-model)
+10. [Setup from zero](#setup-from-zero)
+11. [Configuration reference](#configuration-reference)
+12. [Verifying a deployment](#verifying-a-deployment)
+13. [Troubleshooting](#troubleshooting)
+14. [Known limits](#known-limits)
+15. [Licence](#licence)
 
 ---
 
