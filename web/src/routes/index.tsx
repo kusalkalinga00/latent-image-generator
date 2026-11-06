@@ -19,13 +19,14 @@ import { pushToast } from '#/lib/toast'
 
 export const Route = createFileRoute('/')({ component: App })
 
-const MAX_IMAGES = 3
+const MAX_IMAGES = 4
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 const MAX_EDGE = 1536 // the model works around 1MP; larger just costs GPU seconds
 
-// The backend holds one model: 2511 with the 4-step Lightning LoRA attached. There
-// is no second "standard" path to switch to, so steps are not a choice the UI can
-// offer - passing 4 is the honest thing to send.
+// The backend holds one model - Qwen-Image-2.1 with the 4-step Lightning LoRA - and
+// it does both generation and editing. There is no second "standard" path to switch
+// to, so steps are not a choice the UI can offer; passing 4 is the honest thing to
+// send.
 const STEPS = 4
 
 const WAIT_PHASES = {
@@ -495,8 +496,9 @@ function App() {
   // What the picture on the stage is: an edited photo, or one from nothing.
   const [lastMode, setLastMode] = useState<Mode>('edit')
   const [aspect, setAspect] = useState<Aspect>('1:1')
-  // The model cannot emit alpha, so this asks the backend to cut the background
-  // out afterwards; `resultAlpha` records whether that actually happened.
+  // 2.1 can emit real alpha, so this asks the model for it in the prompt the
+  // backend builds, and `resultAlpha` records whether an alpha channel actually
+  // came back - the field reports what happened, not what was asked.
   //
   // Default is "decide from the prompt", because a prompt that says "transparent
   // background" is asking for exactly this and should not require finding a
