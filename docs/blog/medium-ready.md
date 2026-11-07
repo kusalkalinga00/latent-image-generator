@@ -1,8 +1,8 @@
 Title (Medium field):
-Create your own self-hosted image generator for free
+Create your own AI image generator for zero dollars
 
 Subtitle (Medium field):
-Clone the repo, point it at your own Modal account, deploy.
+A step-by-step guide to running Qwen-Image-2.1 on Modal and a React UI on Vercel, using only free tiers.
 
 Tags: AI, Machine Learning, Web Development, Side Project, Deployment
 Cover: medium-cover.png
