@@ -624,7 +624,7 @@ storage-bound.
 
 ### 0. Prerequisites
 
-- [`uv`](https://docs.astral.sh/uv/) (Python 3.12+), Node 20+, `pnpm`
+- [`uv`](https://docs.astral.sh/uv/) (Python 3.12+), Node 22+, `pnpm`
 - a Modal account (Starter includes $30/month of compute)
 - a Vercel account for the web half
 
@@ -641,8 +641,9 @@ uv sync --all-packages           # the uv workspace: modal_app
 uv run --package modal-app modal run modal_app/src/modal_app/app.py::check_env
 ```
 
-This loads the processor, imports `peft`, checks that `diffusers` exports both pipeline classes,
-and constructs the distillation scheduler. Everything it checks has failed at least once, and
+This loads the processor, imports `peft`, checks that `diffusers` exports `QwenImage21Pipeline`,
+and constructs the distillation scheduler. It also fetches the LoRA's filename, which is the thing
+that makes 4 steps possible. Everything it checks has failed at least once, and
 every one of those failures only surfaced on a GPU. Run it before every deploy that touches the
 image.
 
@@ -664,7 +665,15 @@ retries, and reports progress. The final 5 GiB took seconds once it was off.
 `download_weights` calls `commit()` on the Volume — without that the writes vanish when the
 container exits and every cold start re-downloads everything.
 
-### 4. Prove both models actually run
+### 4. Prove the model actually runs
+
+All three paths in one container — generate, generate with alpha, edit — is one cold start:
+
+```sh
+uv run --package modal-app modal run modal_app/src/modal_app/app.py::selftest
+```
+
+Or one at a time:
 
 ```sh
 uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke \
@@ -674,7 +683,7 @@ uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke_gener
     --prompt "a red fox in falling snow" --aspect 1:1
 ```
 
-Outputs land in `outputs/`. Each run costs a cold start (~$0.10–0.15).
+Outputs land in `outputs/`. Each run costs a cold start (~$0.09).
 
 ### 5. Deploy the GPU service
 
@@ -779,7 +788,7 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 | Do all three paths work in one container? | `modal run …::selftest` |
 | Does an edit produce a sane image? | `modal run …::smoke --image … --prompt …` |
 | Does a generation? | `modal run …::smoke_generate --prompt …` |
-| Does transparency really produce alpha? | `modal run …::smoke_generate --transparent true`, then check the PNG's mode |
+| Does transparency really produce alpha? | `modal run …::smoke_generate --transparent`, then check the PNG's mode |
 | Can a finished render be collected by id? | `POST api` with a `job_id`, then `GET result?job_id=…` |
 | Does an unknown id answer `pending`? | `GET result?job_id=never-sent` |
 | Is the app that is deployed the code I just wrote? | `modal app list`, then compare deploy time |

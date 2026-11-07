@@ -50,7 +50,7 @@ The old path — a geometric key plus a u2net fallback in `matting.py`, with a
 ```sh
 # prove it: writes an RGBA PNG and prints alpha=true
 uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke_generate \
-    --transparent true --prompt "a cute cartoon dragon sticker"
+    --transparent --prompt "a cute cartoon dragon sticker"
 ```
 
 ## Sizes
