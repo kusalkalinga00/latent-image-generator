@@ -29,11 +29,12 @@ Clone the repo and install dependencies.
 git clone https://github.com/kusalkalinga00/latent-image-generator.git
 cd latent-image-generator
 
-modal setup
 uv sync --all-packages
+uv run --package modal-app modal setup
 ```
 
-`modal setup` opens the browser and logs the CLI in.
+`modal` comes from the workspace, so the sync has to run first — a fresh checkout has no `modal`
+command until it does. `modal setup` opens the browser and logs the CLI in.
 
 Next, check that the dependencies load before you rent a GPU.
 

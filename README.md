@@ -628,12 +628,18 @@ storage-bound.
 - a Modal account (Starter includes $30/month of compute)
 - a Vercel account for the web half
 
-### 1. Authenticate and install
+### 1. Install, then authenticate
+
+`modal` is a dependency of the `modal_app` package, not of your machine — on a clean checkout there
+is no `modal` command yet, so sync first.
 
 ```sh
-modal setup                      # opens the browser
-uv sync --all-packages           # the uv workspace: modal_app
+uv sync --all-packages                   # the uv workspace: modal_app
+uv run --package modal-app modal setup   # opens the browser
 ```
+
+If you would rather have `modal` on your `PATH` for the rest of your life, `uv tool install modal`
+does that. Every command below uses `uv run`, so it works without it.
 
 ### 2. Prove the dependency set — on a CPU, for cents
 
@@ -701,7 +707,7 @@ https://<workspace>--image-editor-usage.modal.run   GET   (proxy auth)
 ### 6. Create a proxy token
 
 ```sh
-modal workspace proxy-tokens create
+uv run --package modal-app modal workspace proxy-tokens create
 ```
 
 You get a `wk-…` id and a `ws-…` secret. This is what keeps the endpoint private: without it the

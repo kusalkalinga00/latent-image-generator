@@ -56,12 +56,12 @@ is gated.
 git clone https://github.com/kusalkalinga00/latent-image-generator.git
 cd latent-image-generator
 
-modal setup                 # opens a browser, writes ~/.modal.toml
-uv sync --all-packages      # installs the modal_app workspace
+uv sync --all-packages                   # installs the modal_app workspace, and the modal CLI with it
+uv run --package modal-app modal setup   # opens a browser, writes ~/.modal.toml
 ```
 
-`modal setup` is a one-time CLI login. If any `modal` command below fails with an auth error, run it
-again.
+`modal` comes from the workspace, not from your machine, so the sync has to happen first — a fresh
+checkout has no `modal` command until it does. `modal setup` is a one-time CLI login.
 
 ---
 
@@ -170,7 +170,7 @@ you need it in step 7.
 ## 6. Create a proxy token
 
 ```sh
-modal workspace proxy-tokens create
+uv run --package modal-app modal workspace proxy-tokens create
 ```
 
 You get a `wk-…` id and a `ws-…` secret. This is the pair the web app sends as a bearer token.
