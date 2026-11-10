@@ -940,3 +940,47 @@ def smoke(
         f"({out['steps']} steps, {out['size'][0]}x{out['size'][1]}), "
         f"alpha={out['transparent']}"
     )
+
+
+@app.local_entrypoint()
+def batch_prompts(
+    prompts: str,
+    out_dir: str = "outputs/batch",
+    aspect: str = DEFAULT_ASPECT,
+    transparent: bool = True,
+    steps: int = DEFAULT_STEPS,
+    seed: int = 7,
+) -> None:
+    """Render every prompt in a JSON list in ONE container.
+
+    One cold start, one idle tail, N renders at the warm marginal rate — the
+    batching that COST.md says changes the monthly figure by an order of
+    magnitude. Each item may override aspect/seed/transparent.
+
+        uv run --package modal-app modal run modal_app/src/modal_app/app.py::batch_prompts \
+            --prompts koreapath_pictures.json
+    """
+    import json
+    import pathlib
+
+    items = json.loads(pathlib.Path(prompts).read_text())
+    target = pathlib.Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    for item in items:
+        out = _render(
+            item["prompt"],
+            item.get("aspect", aspect),
+            [],
+            int(item.get("steps", steps)),
+            int(item.get("seed", seed)),
+            bool(item.get("transparent", transparent)),
+        )
+        path = target / f"{item['id']}.png"
+        path.write_bytes(out["png"])
+        print(
+            f"{item['id']}: {out['seconds']}s {out['size'][0]}x{out['size'][1]} "
+            f"alpha={out['transparent']} -> {path} ({len(out['png']) // 1024} KB)",
+            flush=True,
+        )
+    print(f"done: {len(items)} images in {time.time() - started:.1f}s, one container", flush=True)
