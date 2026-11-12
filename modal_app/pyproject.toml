@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "modal>=1.5.3",
+    "modal>=1.6.3",
     "pillow>=11.0.0",
 ]
 
