@@ -1,9 +1,4 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&display=swap');
-@import 'tailwindcss';
-
-@theme {
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
-}
 
 /* ------------------------------------------------------------------ *
  * Tokens
@@ -15,6 +10,7 @@
  * never a dark flash.
  * ------------------------------------------------------------------ */
 :root {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --accent: #2563eb;
   --accent-ink: #ffffff;
   --accent-soft: rgba(37, 99, 235, 0.16);
