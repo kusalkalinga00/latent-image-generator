@@ -164,6 +164,8 @@ function TransparentControl({
   )
 }
 
+const ASPECT_OPTIONS = Object.keys(ASPECT_LABELS) as Aspect[]
+
 function ShapeControl({
   value,
   onChange,
@@ -173,6 +175,8 @@ function ShapeControl({
 }) {
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([])
 
   // A native <select> cannot be styled and its popup is placed by the OS — on a
   // phone it landed over the headline, far from the control that opened it. This
@@ -193,11 +197,22 @@ function ShapeControl({
     }
   }, [open])
 
-  const options = Object.keys(ASPECT_LABELS) as Aspect[]
+  // Opening moves focus into the list, where the arrow keys take over.
+  useEffect(() => {
+    if (!open) return
+    optionRefs.current[ASPECT_OPTIONS.indexOf(value)]?.focus()
+  }, [open, value])
+
+  const choose = (next: Aspect) => {
+    onChange(next)
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
 
   return (
     <div className="shape" ref={wrap}>
       <button
+        ref={triggerRef}
         type="button"
         className="shape-trigger"
         aria-haspopup="listbox"
@@ -219,16 +234,40 @@ function ShapeControl({
 
       {open && (
         <ul className="shape-menu" role="listbox" aria-label="Image shape">
-          {options.map((option) => (
-            <li key={option}>
+          {ASPECT_OPTIONS.map((option, index) => (
+            <li key={option} role="presentation">
               <button
+                ref={(node) => {
+                  optionRefs.current[index] = node
+                }}
                 type="button"
                 role="option"
                 aria-selected={option === value}
+                tabIndex={option === value ? 0 : -1}
                 className={`shape-choice${option === value ? ' is-on' : ''}`}
-                onClick={() => {
-                  onChange(option)
-                  setOpen(false)
+                onClick={() => choose(option)}
+                onKeyDown={(event) => {
+                  const focusOption = (nextIndex: number) => {
+                    event.preventDefault()
+                    onChange(ASPECT_OPTIONS[nextIndex])
+                    optionRefs.current[nextIndex]?.focus()
+                  }
+                  if (event.key === 'ArrowDown') {
+                    focusOption((index + 1) % ASPECT_OPTIONS.length)
+                  } else if (event.key === 'ArrowUp') {
+                    focusOption(
+                      (index - 1 + ASPECT_OPTIONS.length) %
+                        ASPECT_OPTIONS.length,
+                    )
+                  } else if (event.key === 'Home') {
+                    focusOption(0)
+                  } else if (event.key === 'End') {
+                    focusOption(ASPECT_OPTIONS.length - 1)
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault()
+                    setOpen(false)
+                    triggerRef.current?.focus()
+                  }
                 }}
               >
                 <ShapeGlyph aspect={option} />
