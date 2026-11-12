@@ -16,7 +16,7 @@ export const BRAND = {
   wordmark: 'latent',
   title: 'Latent — describe an image, or drop a photo',
   description:
-    'A photo changes; a sentence makes something new. One composer for both, Qwen-Image-2.1 on an on-demand GPU, and nothing is stored.',
+    'A photo changes; a sentence makes something new. One composer for both, Qwen-Image-2.1 on an on-demand GPU. Renders are deleted after 45 minutes.',
   url: 'https://image-editor-sooty-two.vercel.app',
 } as const
 

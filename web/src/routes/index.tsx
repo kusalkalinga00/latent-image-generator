@@ -953,7 +953,7 @@ function App() {
             </h1>
             <p>
               With a photo, your words change it. Without one, they make
-              something new. Nothing is stored either way.
+              something new. Renders are deleted after 45 minutes.
             </p>
             <div className="row">
               <button
@@ -1187,7 +1187,7 @@ function App() {
 
         <p className="disclaimer">
           Qwen-Image ·{narrow ? ' ' : ' on-demand GPU · '}
-          <b>images are not stored</b>
+          <b>renders deleted after 45 min</b>
           {transparent && ' · transparent'}
           <span className="only-pointer"> · ⌘↵ to send</span>
         </p>
