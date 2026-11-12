@@ -924,6 +924,12 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     if job_id and not JOB_ID_RE.fullmatch(job_id):
         return {"ok": False, "error": "job_id is not valid"}
 
+    # The monthly grant is the real ceiling. Check it before either counter so an
+    # exhausted budget does not spend a daily or hourly slot on a refused request.
+    credit_ok, credit_error = _credit_gate()
+    if not credit_ok:
+        return {"ok": False, "limited": True, "error": credit_error}
+
     # The per-address limit stops one connection; this global ceiling stops a
     # shared link that reached many of them.
     allowed, retry_after = _daily_limit()
@@ -943,12 +949,6 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
                 f"Try again in about {wait}."
             ),
         }
-
-    # The monthly grant is the real ceiling. Check it before the per-address
-    # window so an exhausted budget does not consume someone's hourly slot.
-    credit_ok, credit_error = _credit_gate()
-    if not credit_ok:
-        return {"ok": False, "limited": True, "error": credit_error}
 
     # Counted before the render, after the validation above: a rejected request
     # must not spend someone's quota, and a render must not start without one.
