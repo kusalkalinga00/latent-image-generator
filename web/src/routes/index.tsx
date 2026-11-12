@@ -248,6 +248,10 @@ function ShapeControl({
 
 /** localStorage key for a render that is still owed to this device. */
 const PENDING_KEY = 'image-editor:pending'
+// Matches RESULTS_TTL_S in modal_app/src/modal_app/app.py: the backend keeps a
+// finished render for 45 minutes, so forgetting the id at 30 only threw away
+// recovery time that was still there.
+const PENDING_MAX_AGE_MS = 45 * 60 * 1000
 
 interface PendingJob {
   id: string
@@ -868,7 +872,7 @@ function App() {
       rememberJob(null)
       return
     }
-    if (!job.id || Date.now() - job.at > 30 * 60 * 1000) {
+    if (!job.id || Date.now() - job.at > PENDING_MAX_AGE_MS) {
       rememberJob(null)
       return
     }
