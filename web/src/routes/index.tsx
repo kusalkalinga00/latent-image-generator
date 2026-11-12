@@ -318,23 +318,17 @@ function needsShareSheet(): boolean {
 }
 
 /**
- * A data: URL as a File, decoded synchronously.
+ * The result as a Blob, decoded synchronously.
  *
  * `navigator.share()` has to be called while the tap gesture is still live, so the
- * base64 cannot be decoded through `fetch(dataUrl)` — that await loses the gesture
- * on iOS and the sheet never opens.
+ * PNG cannot be decoded through `fetch()`; the Blob is built when the result
+ * arrives, and the tap only wraps it in a File.
  */
-function dataUrlToFile(dataUrl: string, name: string): File | null {
-  const comma = dataUrl.indexOf(',')
-  if (comma === -1 || !dataUrl.slice(0, comma).includes('base64')) return null
-  try {
-    const binary = atob(dataUrl.slice(comma + 1))
-    const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
-    return new File([bytes], name, { type: 'image/png' })
-  } catch {
-    return null
-  }
+function base64ToBlob(base64: string, type = 'image/png'): Blob {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return new Blob([bytes], { type })
 }
 
 const EXAMPLES = [
@@ -598,6 +592,7 @@ function App() {
     'idle',
   )
   const [resultUrl, setResultUrl] = useState('')
+  const [resultBlob, setResultBlob] = useState<Blob | null>(null)
   const [resultMeta, setResultMeta] = useState('')
   // Straight from the backend, which knows which checkpoint it called.
   const [resultModel, setResultModel] = useState('')
@@ -639,6 +634,7 @@ function App() {
   const runId = useRef(0)
   const warmed = useRef(false)
   const lastResultAt = useRef(0)
+  const resultUrlRef = useRef('')
   statusRef.current = status
 
   const stageRef = useRef<HTMLElement>(null)
@@ -695,6 +691,19 @@ function App() {
     void document.fonts.ready.then(fit)
     return () => window.removeEventListener('resize', fit)
   }, [prompt, narrow])
+
+  /**
+   * Replace the result and free the previous object URL.
+   *
+   * The result is a Blob URL, not a base64 data URL: the data URL kept another
+   * full copy of the image alive in React state and in the DOM.
+   */
+  const replaceResultUrl = useCallback((url: string) => {
+    const previous = resultUrlRef.current
+    if (previous.startsWith('blob:')) URL.revokeObjectURL(previous)
+    resultUrlRef.current = url
+    setResultUrl(url)
+  }, [])
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -755,7 +764,8 @@ function App() {
       if (prepared.length > 0) {
         setAttachments((prev) => [...prev, ...prepared].slice(0, MAX_IMAGES))
         // A new input invalidates whatever is on the stage.
-        setResultUrl('')
+        setResultBlob(null)
+        replaceResultUrl('')
         setResultMeta('')
         setErrorText('')
         setLastPrompt('')
@@ -768,7 +778,7 @@ function App() {
         )
       }
     },
-    [attachments],
+    [attachments, replaceResultUrl],
   )
 
   useEffect(() => {
@@ -812,7 +822,8 @@ function App() {
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id))
-    setResultUrl('')
+    setResultBlob(null)
+    replaceResultUrl('')
     setResultMeta('')
     setLastPrompt('')
     setStatus('idle')
@@ -832,23 +843,28 @@ function App() {
     }
   }, [])
 
-  const showResult = useCallback((out: EditOutput, mode: Mode) => {
-    if (!out.imageBase64) return
-    warmed.current = true
-    lastResultAt.current = Date.now()
-    setResultUrl(`data:image/png;base64,${out.imageBase64}`)
-    setResultMeta(`${out.seconds}s · ${out.steps} steps`)
-    setResultModel(out.model ?? '')
-    setResultAlpha(out.transparent === true)
-    setStatus('done')
-    void refreshCredit()
-    if (out.seconds) {
-      pushToast(
-        'success',
-        `${mode === 'generate' ? 'Generated' : 'Edit ready'} in ${out.seconds}s.`,
-      )
-    }
-  }, [])
+  const showResult = useCallback(
+    (out: EditOutput, mode: Mode) => {
+      if (!out.imageBase64) return
+      const blob = base64ToBlob(out.imageBase64)
+      warmed.current = true
+      lastResultAt.current = Date.now()
+      setResultBlob(blob)
+      replaceResultUrl(URL.createObjectURL(blob))
+      setResultMeta(`${out.seconds}s · ${out.steps} steps`)
+      setResultModel(out.model ?? '')
+      setResultAlpha(out.transparent === true)
+      setStatus('done')
+      void refreshCredit()
+      if (out.seconds) {
+        pushToast(
+          'success',
+          `${mode === 'generate' ? 'Generated' : 'Edit ready'} in ${out.seconds}s.`,
+        )
+      }
+    },
+    [replaceResultUrl],
+  )
 
   /**
    * Ask the backend for a render whose reply never arrived.
@@ -1040,7 +1056,8 @@ function App() {
     // Starting over also gives up the claim on any render still in flight.
     rememberJob(null)
     setPrompt('')
-    setResultUrl('')
+    setResultBlob(null)
+    replaceResultUrl('')
     setResultMeta('')
     setErrorText('')
     setLastPrompt('')
@@ -1049,15 +1066,15 @@ function App() {
   }
 
   const continueFromResult = async () => {
-    if (!resultUrl) return
+    if (!resultBlob) return
     try {
-      const blob = await fetch(resultUrl).then((response) => response.blob())
       const next = await prepareImage(
-        new File([blob], 'edited.png', { type: 'image/png' }),
+        new File([resultBlob], 'edited.png', { type: 'image/png' }),
       )
       setAttachments([next])
       setPrompt('')
-      setResultUrl('')
+      setResultBlob(null)
+      replaceResultUrl('')
       setResultMeta('')
       setLastPrompt('')
       setStatus('idle')
@@ -1071,15 +1088,14 @@ function App() {
   }
 
   const download = () => {
-    if (!resultUrl) return
+    if (!resultBlob) return
     const name = `${resultAlpha ? 'transparent' : 'edited'}-${Date.now()}.png`
 
-    // Decoded synchronously so the iOS branch below can still call share() inside
-    // the tap gesture; elsewhere it doubles as the Blob behind the download.
-    const file = dataUrlToFile(resultUrl, name)
+    // The Blob is already in memory, so wrapping it in a File is synchronous and
+    // the iOS branch can still call share() inside the tap gesture.
+    const file = new File([resultBlob], name, { type: 'image/png' })
 
     if (
-      file &&
       needsShareSheet() &&
       typeof navigator.canShare === 'function' &&
       navigator.canShare({ files: [file] })
@@ -1106,7 +1122,7 @@ function App() {
     // An object URL, not the data: URL. Safari has ignored `download` on data: URLs
     // long enough that relying on it is a coin flip, and a Blob URL is what every
     // browser treats as an ordinary file.
-    const href = file ? URL.createObjectURL(file) : resultUrl
+    const href = URL.createObjectURL(file)
     const a = document.createElement('a')
     a.href = href
     a.download = name
@@ -1116,7 +1132,7 @@ function App() {
     a.remove()
     // Revoking immediately can cancel the save in some browsers; a few seconds is
     // long enough for the download to have started reading.
-    if (file) setTimeout(() => URL.revokeObjectURL(href), 10_000)
+    setTimeout(() => URL.revokeObjectURL(href), 10_000)
     pushToast('success', 'Download started.')
   }
 
