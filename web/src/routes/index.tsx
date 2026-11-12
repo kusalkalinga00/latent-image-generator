@@ -545,7 +545,13 @@ const Dots = memo(function Dots({
     <>
       {Array.from({ length: cols * DOT_ROWS }, (_, index) => {
         const rank = DOT_ORDER[index % DOT_ORDER.length]
-        return <i key={index} className={rank < filled ? 'on' : undefined} />
+        return (
+          <i
+            key={index}
+            aria-hidden="true"
+            className={rank < filled ? 'on' : undefined}
+          />
+        )
       })}
     </>
   )
