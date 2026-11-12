@@ -942,6 +942,11 @@ function App() {
         // telling the user anything went wrong.
         if (out.network && (await collect(jobId, mode, id))) return
 
+        // Anything else is a definitive refusal - validation, rate limit, or a
+        // model failure - and nothing was stored under this id. Keeping it would
+        // make the next reload poll for a render that never existed.
+        if (!out.network) rememberJob(null)
+
         const message =
           out.error ?? 'The edit did not finish. Try again in a moment.'
         setPrompt(instruction)
