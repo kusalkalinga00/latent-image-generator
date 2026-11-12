@@ -88,6 +88,42 @@
   box-sizing: border-box;
 }
 
+/* Tailwind's preflight used to provide these resets; keep the same baseline now
+ * that styles.css no longer imports it. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+p,
+figure,
+blockquote,
+dl,
+dd {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+img,
+svg,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
 html,
 body {
   height: 100%;
@@ -116,12 +152,17 @@ body {
 
 button,
 input,
-textarea {
-  font-family: inherit;
+textarea,
+select {
+  font: inherit;
+  color: inherit;
 }
 
 button {
-  color: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
 }
 
 /* ------------------------------------------------------------------ *
