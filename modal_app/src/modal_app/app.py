@@ -390,6 +390,10 @@ def volume_stats() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _clamp_alpha(value: float) -> float:
+    return 0 if value < ALPHA_CLAMP else value
+
+
 def _snap_alpha(png: bytes) -> bytes:
     """Clamp the faint background haze to fully transparent.
 
@@ -399,12 +403,10 @@ def _snap_alpha(png: bytes) -> bytes:
     """
     from PIL import Image
 
-    image = Image.open(io.BytesIO(png))
+    image: Image.Image = Image.open(io.BytesIO(png))
     if image.mode != "RGBA":
         image = image.convert("RGBA")
-    alpha = image.getchannel("A").point(
-        lambda value: 0 if value < ALPHA_CLAMP else value
-    )
+    alpha = image.getchannel("A").point(_clamp_alpha)
     image.putalpha(alpha)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -437,7 +439,7 @@ def _useful_alpha(png: bytes) -> bool:
     if image.mode != "RGBA":
         return False
     low, _high = image.getchannel("A").getextrema()
-    return low < 250
+    return isinstance(low, (int, float)) and low < 250
 
 
 @app.cls(
