@@ -701,9 +701,14 @@ function App() {
       )
       let remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
 
+      const filesToAdd = incoming.slice(0, room)
       const prepared: Attachment[] = []
-      for (const file of incoming.slice(0, room)) {
-        if (remaining < MIN_ATTACHMENT_CHARS) {
+      for (const [index, file] of filesToAdd.entries()) {
+        // Divide what is left by the files still to add, so one large photo cannot
+        // consume the whole budget and leave the rest unreadable. A file that needs
+        // less than its share leaves more for the next one.
+        const share = Math.floor(remaining / (filesToAdd.length - index))
+        if (share < MIN_ATTACHMENT_CHARS) {
           pushToast(
             'error',
             'Those images are too large together. Remove one or add a smaller image.',
@@ -711,7 +716,7 @@ function App() {
           break
         }
         try {
-          const next = await prepareImage(file, remaining)
+          const next = await prepareImage(file, share)
           prepared.push(next)
           remaining -= next.base64.length
         } catch (err) {
