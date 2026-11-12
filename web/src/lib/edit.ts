@@ -86,6 +86,9 @@ export interface EditOutput {
  */
 const MAX_TOTAL_ATTACHMENT_CHARS = 3_400_000
 
+/** One limit for both jobs: the model sees the same text either way. */
+export const MAX_PROMPT_CHARS = 2000
+
 /** The buckets the model was trained at; off-bucket sizes cost quality. */
 export const ASPECTS = [
   '1:1',
@@ -279,6 +282,11 @@ export const editImage = createServerFn({ method: 'POST' })
     if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
       return failed('Describe the edit you want.')
     }
+    if (data.prompt.length > MAX_PROMPT_CHARS) {
+      return failed(
+        `That prompt is too long. Keep it under ${MAX_PROMPT_CHARS} characters.`,
+      )
+    }
     if (!Number.isInteger(data.steps) || data.steps < 4 || data.steps > 20) {
       return failed('Steps must be between 4 and 20.')
     }
@@ -305,8 +313,10 @@ export const generateImage = createServerFn({ method: 'POST' })
     if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
       return failed('Describe the image you want.')
     }
-    if (data.prompt.length > 2000) {
-      return failed('That prompt is too long. Keep it under 2000 characters.')
+    if (data.prompt.length > MAX_PROMPT_CHARS) {
+      return failed(
+        `That prompt is too long. Keep it under ${MAX_PROMPT_CHARS} characters.`,
+      )
     }
     if (!ASPECTS.includes(data.aspect)) {
       return failed('Pick a shape for the image.')

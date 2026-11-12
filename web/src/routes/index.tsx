@@ -10,6 +10,7 @@ import type { CSSProperties } from 'react'
 import { refreshCredit } from '#/lib/credit-store'
 import {
   ASPECT_LABELS,
+  MAX_PROMPT_CHARS,
   collectResult,
   editImage,
   generateImage,
@@ -1410,6 +1411,7 @@ function App() {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={1}
+            maxLength={MAX_PROMPT_CHARS}
             placeholder={
               attachments.length > 0
                 ? 'Describe the change…'
