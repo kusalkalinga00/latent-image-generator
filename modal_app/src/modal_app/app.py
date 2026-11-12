@@ -928,14 +928,19 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     # shared link that reached many of them.
     allowed, retry_after = _daily_limit()
     if not allowed:
-        hours = max(1, (retry_after + 3599) // 3600)
+        if retry_after < 3600:
+            minutes = max(1, (retry_after + 59) // 60)
+            wait = f"{minutes} minute{'s' if minutes != 1 else ''}"
+        else:
+            hours = (retry_after + 3599) // 3600
+            wait = f"{hours} hour{'s' if hours != 1 else ''}"
         return {
             "ok": False,
             "limited": True,
             "retry_after": retry_after,
             "error": (
                 f"The studio has reached its {DAILY_RENDER_MAX}-render daily limit. "
-                f"Try again in about {hours} hour{'s' if hours != 1 else ''}."
+                f"Try again in about {wait}."
             ),
         }
 
