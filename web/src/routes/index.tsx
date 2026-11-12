@@ -734,29 +734,32 @@ function App() {
         (sum, item) => sum + encodedChars(item.previewUrl),
         0,
       )
-      let remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
+      const remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
 
       const filesToAdd = incoming.slice(0, room)
+      // An equal share keeps the total under the request budget while letting the
+      // encodes run together: four photos used to be decoded one after another.
+      const share = Math.floor(remaining / filesToAdd.length)
+      if (share < MIN_ATTACHMENT_CHARS) {
+        pushToast(
+          'error',
+          'Those images are too large together. Remove one or add a smaller image.',
+        )
+        return
+      }
+
+      const settled = await Promise.allSettled(
+        filesToAdd.map((file) => prepareImage(file, share)),
+      )
       const prepared: Attachment[] = []
-      for (const [index, file] of filesToAdd.entries()) {
-        // Divide what is left by the files still to add, so one large photo cannot
-        // consume the whole budget and leave the rest unreadable. A file that needs
-        // less than its share leaves more for the next one.
-        const share = Math.floor(remaining / (filesToAdd.length - index))
-        if (share < MIN_ATTACHMENT_CHARS) {
-          pushToast(
-            'error',
-            'Those images are too large together. Remove one or add a smaller image.',
-          )
-          break
-        }
-        try {
-          const next = await prepareImage(file, share)
-          prepared.push(next)
-          remaining -= encodedChars(next.previewUrl)
-        } catch (err) {
+      for (const result of settled) {
+        if (result.status === 'fulfilled') {
+          prepared.push(result.value)
+        } else {
           const message =
-            err instanceof Error ? err.message : 'Could not read that image.'
+            result.reason instanceof Error
+              ? result.reason.message
+              : 'Could not read that image.'
           pushToast('error', message)
         }
       }
