@@ -6,8 +6,8 @@ on:
   pull_request:
 
 # Nothing here touches Modal or Vercel credentials: the web checks are static, and
-# the Python job only compiles what is on disk. A pull request from a fork must be
-# safe to run.
+# the Python job installs the locked dev group and runs ruff/pytest without a Modal
+# login or a GPU. A pull request from a fork must be safe to run.
 permissions:
   contents: read
 
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   web:
-    name: web — typecheck, lint, format, build
+    name: web — typecheck, lint, format, test, build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -48,19 +48,44 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm check
+      - run: pnpm test
+
+      # routeTree.gen.ts is generated and committed. The generator writes the
+      # routes and the Start build plugin adds the SSR registration, so run both
+      # and fail if the committed tree differs.
+      - run: pnpm generate-routes
       - run: pnpm build
+      - run: git diff --exit-code
 
   python:
-    name: python — syntax
+    name: python — lint, tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.12'
+          enable-cache: true
 
-      # compileall parses every file without importing it, so this catches syntax
-      # errors and nothing else - which is the point: no torch, no Modal login, no
-      # GPU, no runtime.
-      - run: python -m compileall -q modal_app/src scripts
+      # --frozen proves the lockfile is current; the dev group brings pytest and
+      # ruff. Nothing here imports torch or contacts Modal.
+      - run: uv sync --all-packages --group dev --frozen
+      - run: uv run ruff check modal_app scripts
+      - run: uv run mypy
+      - run: uv run pytest
+
+  secrets:
+    name: secrets — gitleaks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, so a secret removed in a later commit is still caught.
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

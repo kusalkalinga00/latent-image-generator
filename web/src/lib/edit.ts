@@ -54,9 +54,11 @@ function callerIp(): string {
   }
 }
 
+export type Mode = 'edit' | 'generate'
+
 export interface EditOutput {
   ok: boolean
-  mode?: 'edit' | 'generate'
+  mode?: Mode
   model?: string
   /** The render is still running: ask again rather than starting a new one. */
   pending?: boolean

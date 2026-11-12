@@ -2,12 +2,13 @@ import { createFileRoute } from '@tanstack/react-router'
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
 } from 'react'
-import type { CSSProperties } from 'react'
+import Compare from '#/components/Compare'
+import { ShapeControl, TransparentControl } from '#/components/ComposerControls'
+import Sketching from '#/components/Sketching'
 import {
   MIN_CREDIT_USD,
   getCreditSnapshot,
@@ -16,14 +17,14 @@ import {
   subscribeCredit,
 } from '#/lib/credit-store'
 import {
-  ASPECT_LABELS,
   MAX_PROMPT_CHARS,
   collectResult,
   editImage,
   generateImage,
 } from '#/lib/edit'
-import type { Aspect, EditOutput } from '#/lib/edit'
+import type { Aspect, EditOutput, Mode } from '#/lib/edit'
 import { pushToast } from '#/lib/toast'
+import { wantsTransparent } from '#/lib/transparency'
 
 export const Route = createFileRoute('/')({ component: App })
 
@@ -43,219 +44,10 @@ const MIN_ATTACHMENT_CHARS = 64_000
 // it does both generation and editing. The four-step schedule is fixed server-side,
 // so there is no steps control and no steps field in the request.
 
-const WAIT_PHASES = {
-  edit: ['Starting a GPU', 'Loading the model', 'Editing'],
-  generate: ['Starting a GPU', 'Loading the model', 'Painting'],
-} as const
-
 // Modal keeps the container for 60s after the last render. Past that the next
 // call pays the weight load again, so the progress estimate has to fall back to
 // the cold curve instead of staying "warm" for the rest of the session.
 const WARM_WINDOW_MS = 90_000
-
-type Mode = 'edit' | 'generate'
-
-const DOT_COLS = 26
-const DOT_ROWS = 15
-const DOT_TOTAL = DOT_COLS * DOT_ROWS
-
-/**
- * The order dots light up in.
- *
- * A fixed shuffle, not Math.random(): the field has to look scattered while every
- * tick keeps the same arrangement, or the picture reshuffles itself ten times a
- * second and reads as noise instead of progress.
- */
-const DOT_ORDER = (() => {
-  const order = Array.from({ length: DOT_TOTAL }, (_, i) => i)
-  let seed = 7
-  const next = () => {
-    seed = (seed * 16807) % 2147483647
-    return seed / 2147483647
-  }
-  for (let i = order.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(next() * (i + 1))
-    const swap = order[i]
-    order[i] = order[j]
-    order[j] = swap
-  }
-  return order
-})()
-
-function waitStep(elapsed: number, warmed: boolean) {
-  if (warmed || elapsed >= 30) return 2
-  if (elapsed >= 8) return 1
-  return 0
-}
-
-function waitProgress(elapsed: number, warmed: boolean) {
-  // Never reaches 100: this is an estimate of a wait whose length depends on a
-  // cold start, so it stops short and the image arriving is the real completion.
-  if (warmed) return Math.min(92, 18 + (elapsed / 4) * 74)
-  if (elapsed < 8) return (elapsed / 8) * 30
-  if (elapsed < 30) return 30 + ((elapsed - 8) / 22) * 40
-  return Math.min(92, 70 + ((elapsed - 30) / 20) * 22)
-}
-
-// Short enough to scan as chips; the point is to show the range of edits, not to
-// write the prompt for the user.
-/**
- * Does the prompt ask for an image with no background?
- *
- * These are phrases about the *output* file, not about anything inside the
- * picture, and the distinction is load-bearing now that transparency is a
- * generation parameter rather than a post-step: a match here rewrites the request
- * so the model spends its four steps drawing an alpha channel. A bare
- * "transparent" used to be a harmless false positive — it produced a cutout from
- * an otherwise normal render — but "a transparent glass of water" would now come
- * back as a cutout of a glass instead of the photograph the user asked for. So
- * "transparent" only counts when it is about the background.
- */
-const WANTS_TRANSPARENT =
-  /\btransparent\s+(background|bg)\b|\brgba\b|\balpha\s+channel\b|\bwith\s+alpha\b|\bcut\s?-?out\b|\bno\s+background\b|remove\s+(the\s+)?background|\bplain\s+(white|solid)\s+background\b|isolated\s+on\s+(white|plain)/i
-
-/**
- * The transparency control, in two dresses: an icon inside the pill on wide
- * screens, a labelled chip in its own row on phones, where a third icon beside a
- * short field was both crowded and indistinguishable from the shape control next
- * to it.
- *
- * It asks the model for an alpha channel rather than cutting anything out, so it
- * is labelled for what it produces.
- */
-function TransparentControl({
-  on,
-  chip,
-  disabled,
-  title,
-  onToggle,
-}: {
-  on: boolean
-  chip: boolean
-  disabled: boolean
-  title: string
-  onToggle: () => void
-}) {
-  return (
-    <button
-      type="button"
-      className={`${chip ? 'chip-toggle' : 'icon-toggle'}${on ? ' is-on' : ''}`}
-      onClick={onToggle}
-      aria-pressed={on}
-      aria-label="Transparent background"
-      title={title}
-      disabled={disabled}
-    >
-      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <rect
-          x="3.6"
-          y="3.6"
-          width="16.8"
-          height="16.8"
-          rx="3.4"
-          stroke="currentColor"
-          strokeWidth="1.5"
-        />
-        <path d="M6.2 6.2h5.8v5.8H6.2zM12 12h5.8v5.8H12z" fill="currentColor" />
-      </svg>
-      {chip && <span>Transparent</span>}
-    </button>
-  )
-}
-
-function ShapeControl({
-  value,
-  onChange,
-}: {
-  value: Aspect
-  onChange: (next: Aspect) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const wrap = useRef<HTMLDivElement>(null)
-
-  // A native <select> cannot be styled and its popup is placed by the OS — on a
-  // phone it landed over the headline, far from the control that opened it. This
-  // is the same list, drawn where it belongs.
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent) => {
-      if (!wrap.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
-
-  const options = Object.keys(ASPECT_LABELS) as Aspect[]
-
-  return (
-    <div className="shape" ref={wrap}>
-      <button
-        type="button"
-        className="shape-trigger"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={`Image shape: ${ASPECT_LABELS[value]}`}
-        onClick={() => setOpen((was) => !was)}
-      >
-        <span>{ASPECT_LABELS[value]}</span>
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          aria-hidden="true"
-        >
-          <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-
-      {open && (
-        <ul className="shape-menu" role="listbox" aria-label="Image shape">
-          {options.map((option) => (
-            <li key={option}>
-              <button
-                type="button"
-                role="option"
-                aria-selected={option === value}
-                className={`shape-choice${option === value ? ' is-on' : ''}`}
-                onClick={() => {
-                  onChange(option)
-                  setOpen(false)
-                }}
-              >
-                <ShapeGlyph aspect={option} />
-                <span>{ASPECT_LABELS[option]}</span>
-                {option === value && (
-                  <svg
-                    className="shape-check"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.4"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M5 12.5l4.5 4.5L19 7"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                )}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
-}
 
 /** localStorage key for a render that is still owed to this device. */
 const PENDING_KEY = 'image-editor:pending'
@@ -269,32 +61,6 @@ interface PendingJob {
   prompt: string
   mode: 'edit' | 'generate'
   at: number
-}
-
-/** The aspect, drawn to scale — a word says "Wide", this shows how wide. */
-function ShapeGlyph({ aspect }: { aspect: Aspect }) {
-  const [w, h] = aspect.split(':').map(Number)
-  const long = 14
-  const width = w >= h ? long : (long * w) / h
-  const height = h >= w ? long : (long * h) / w
-  return (
-    <svg
-      className="shape-glyph"
-      viewBox="0 0 16 16"
-      fill="none"
-      aria-hidden="true"
-    >
-      <rect
-        x={(16 - width) / 2}
-        y={(16 - height) / 2}
-        width={width}
-        height={height}
-        rx="1.6"
-        stroke="currentColor"
-        strokeWidth="1.4"
-      />
-    </svg>
-  )
 }
 
 /**
@@ -317,25 +83,21 @@ function needsShareSheet(): boolean {
 }
 
 /**
- * A data: URL as a File, decoded synchronously.
+ * The result as a Blob, decoded synchronously.
  *
  * `navigator.share()` has to be called while the tap gesture is still live, so the
- * base64 cannot be decoded through `fetch(dataUrl)` — that await loses the gesture
- * on iOS and the sheet never opens.
+ * PNG cannot be decoded through `fetch()`; the Blob is built when the result
+ * arrives, and the tap only wraps it in a File.
  */
-function dataUrlToFile(dataUrl: string, name: string): File | null {
-  const comma = dataUrl.indexOf(',')
-  if (comma === -1 || !dataUrl.slice(0, comma).includes('base64')) return null
-  try {
-    const binary = atob(dataUrl.slice(comma + 1))
-    const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
-    return new File([bytes], name, { type: 'image/png' })
-  } catch {
-    return null
-  }
+function base64ToBlob(base64: string, type = 'image/png'): Blob {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return new Blob([bytes], { type })
 }
 
+// Short enough to scan as chips; the point is to show the range of edits, not to
+// write the prompt for the user.
 const EXAMPLES = [
   'Night with warm street lights',
   'Watercolour painting',
@@ -346,8 +108,14 @@ const EXAMPLES = [
 interface Attachment {
   id: string
   name: string
+  /** The data URL is the only copy: its payload is sent at request time. */
   previewUrl: string
-  base64: string
+}
+
+/** Encoded characters in a data URL, without the `data:...;base64,` prefix. */
+function encodedChars(dataUrl: string) {
+  const comma = dataUrl.indexOf(',')
+  return comma === -1 ? 0 : dataUrl.length - comma - 1
 }
 
 /**
@@ -411,8 +179,7 @@ async function prepareImage(
     canvas.height = height
     ctx.drawImage(bitmap, 0, 0, width, height)
     dataUrl = encodeCanvas(canvas)
-    const chars = dataUrl.length - dataUrl.indexOf(',') - 1
-    if (chars <= budgetChars) break
+    if (encodedChars(dataUrl) <= budgetChars) break
     if (attempt >= 5) {
       bitmap.close()
       throw new Error(
@@ -424,149 +191,15 @@ async function prepareImage(
   }
   bitmap.close()
 
-  const base64 = dataUrl.split(',')[1] ?? ''
-  if (!base64) throw new Error(`${file.name} could not be prepared.`)
+  if (!encodedChars(dataUrl)) {
+    throw new Error(`${file.name} could not be prepared.`)
+  }
 
   return {
     id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: file.name,
     previewUrl: dataUrl,
-    base64,
   }
-}
-
-/**
- * Wipe between the edit and the original, dragged across the image.
- *
- * The whole image is a range input, so it drags with the mouse, taps, and moves
- * with the arrow keys - no pointer-event maths and no inaccessible custom slider.
- */
-function Compare({ before, after }: { before: string; after: string }) {
-  const [pos, setPos] = useState(54)
-
-  return (
-    <div className="compare">
-      <img src={after} alt="Edited result" />
-      <img
-        src={before}
-        alt=""
-        aria-hidden="true"
-        className="compare-overlay"
-        style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
-      />
-      <span className="compare-line" style={{ left: `${pos}%` }} />
-      <span className="compare-grip" style={{ left: `${pos}%` }}>
-        <svg
-          viewBox="0 0 6 10"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.6"
-        >
-          <path d="M5 1L1 5l4 4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <svg
-          viewBox="0 0 6 10"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.6"
-        >
-          <path d="M1 1l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </span>
-      <span className="stage-tag">Before</span>
-      <span className="stage-tag end">After</span>
-      <input
-        className="compare-range"
-        type="range"
-        min={0}
-        max={100}
-        value={pos}
-        aria-label="Compare the original with the edit"
-        onChange={(event) => setPos(Number(event.target.value))}
-      />
-    </div>
-  )
-}
-
-/**
- * The wait, drawn as a field of dots that fills in.
- *
- * A spinner says something is happening; this says how much. It also gives the
- * cold start somewhere to live: the caption names the phase, so 30 seconds of
- * loading reads as a step rather than a stall.
- */
-function Sketching({
-  elapsed,
-  warmed,
-  mode,
-}: {
-  elapsed: number
-  warmed: boolean
-  mode: Mode
-}) {
-  const phase = waitStep(elapsed, warmed)
-  const progress = Math.round(waitProgress(elapsed, warmed))
-  const label = WAIT_PHASES[mode][phase]
-
-  // The grid used to be 26 columns flat, which is 429px of dots and gap: wider
-  // than a 375px phone, and it dragged the whole thread — and the prompt bubble
-  // in it — off the right edge. The column count now comes from the space that
-  // exists, and the dots rendered follow it, so the field always fits and the
-  // percentage still means what it says.
-  // Start conservative: a wide first guess is what overflowed the phone before
-  // the measurement lands, and the measure happens in a layout effect anyway.
-  const [cols, setCols] = useState(12)
-  const blockRef = useRef<HTMLDivElement>(null)
-
-  useLayoutEffect(() => {
-    const el = blockRef.current
-    if (!el) return
-    const fit = () => {
-      // --dot and --gap are declared on .matrix, not on the block, and the width
-      // that matters is the thread's — the block is stretched to it but the grid
-      // inside is what used to push it wide.
-      const grid = el.querySelector('.matrix') ?? el
-      const styles = getComputedStyle(grid)
-      const dot = Number.parseFloat(styles.getPropertyValue('--dot')) || 4
-      const gap = Number.parseFloat(styles.getPropertyValue('--gap')) || 15
-      const width = (el.parentElement ?? el).clientWidth
-      setCols(Math.max(6, Math.floor((width + gap) / (dot + gap))))
-    }
-    fit()
-    const observer = new ResizeObserver(fit)
-    observer.observe(el.parentElement ?? el)
-    return () => observer.disconnect()
-  }, [])
-
-  const total = cols * DOT_ROWS
-  const filled = Math.round((total * progress) / 100)
-
-  return (
-    <div className="matrix-block" ref={blockRef}>
-      <p className="matrix-caption">
-        {label} · {elapsed.toFixed(0)}s
-      </p>
-      <div className="matrix-field">
-        <div
-          className="matrix"
-          style={{ '--cols': cols } as CSSProperties}
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={progress}
-          aria-label={`${label}, ${progress}%`}
-        >
-          {Array.from({ length: total }, (_, index) => {
-            const rank = DOT_ORDER[index % DOT_ORDER.length]
-            return (
-              <i key={index} className={rank < filled ? 'on' : undefined} />
-            )
-          })}
-        </div>
-        <span className="matrix-pct">{progress}%</span>
-      </div>
-    </div>
-  )
 }
 
 function App() {
@@ -579,6 +212,7 @@ function App() {
     'idle',
   )
   const [resultUrl, setResultUrl] = useState('')
+  const [resultBlob, setResultBlob] = useState<Blob | null>(null)
   const [resultMeta, setResultMeta] = useState('')
   // Straight from the backend, which knows which checkpoint it called.
   const [resultModel, setResultModel] = useState('')
@@ -599,7 +233,6 @@ function App() {
     boolean | null
   >(null)
   const [resultAlpha, setResultAlpha] = useState(false)
-  const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
 
   // The chip is public on purpose - this is the free tier, and the budget is part
@@ -621,20 +254,11 @@ function App() {
   const runId = useRef(0)
   const warmed = useRef(false)
   const lastResultAt = useRef(0)
+  const resultUrlRef = useRef('')
   statusRef.current = status
 
-  // The first run of a session loads 53.76 GiB into VRAM, which takes about 30s
-  // before a single denoising step happens. A bare spinner for that reads as
-  // broken, so elapsed time stays on screen and the copy says what is happening.
-  useEffect(() => {
-    if (status !== 'running') return
-    setElapsed(0)
-    const started = Date.now()
-    const id = setInterval(() => setElapsed((Date.now() - started) / 1000), 100)
-    return () => clearInterval(id)
-  }, [status])
-
   const stageRef = useRef<HTMLElement>(null)
+  const resultRef = useRef<HTMLElement>(null)
 
   // When a result arrives the thread is usually taller than the stage on a phone
   // with browser toolbars, and the natural resting position is the top — which
@@ -646,11 +270,21 @@ function App() {
     const pin = () => {
       if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight
     }
+    const focusResult = () => {
+      // Do not steal focus from someone already typing the next prompt.
+      const active = document.activeElement
+      if (!active || active === document.body || active.tagName === 'BUTTON') {
+        resultRef.current?.focus({ preventScroll: true })
+      }
+    }
     // The image is decoded after paint, so one frame is too early to measure the
     // thread; a second frame plus a short settle covers the decode.
     const first = requestAnimationFrame(() => {
       pin()
-      requestAnimationFrame(pin)
+      requestAnimationFrame(() => {
+        pin()
+        focusResult()
+      })
     })
     const settle = window.setTimeout(pin, 250)
     return () => {
@@ -689,6 +323,19 @@ function App() {
     return () => window.removeEventListener('resize', fit)
   }, [prompt, narrow])
 
+  /**
+   * Replace the result and free the previous object URL.
+   *
+   * The result is a Blob URL, not a base64 data URL: the data URL kept another
+   * full copy of the image alive in React state and in the DOM.
+   */
+  const replaceResultUrl = useCallback((url: string) => {
+    const previous = resultUrlRef.current
+    if (previous.startsWith('blob:')) URL.revokeObjectURL(previous)
+    resultUrlRef.current = url
+    setResultUrl(url)
+  }, [])
+
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
       const list = Array.from(files)
@@ -715,32 +362,35 @@ function App() {
       // The budget is shared by every attachment, not per image: the request body
       // carries all of them, and Vercel caps the body, not each part.
       const existingChars = attachments.reduce(
-        (sum, item) => sum + item.base64.length,
+        (sum, item) => sum + encodedChars(item.previewUrl),
         0,
       )
-      let remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
+      const remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
 
       const filesToAdd = incoming.slice(0, room)
+      // An equal share keeps the total under the request budget while letting the
+      // encodes run together: four photos used to be decoded one after another.
+      const share = Math.floor(remaining / filesToAdd.length)
+      if (share < MIN_ATTACHMENT_CHARS) {
+        pushToast(
+          'error',
+          'Those images are too large together. Remove one or add a smaller image.',
+        )
+        return
+      }
+
+      const settled = await Promise.allSettled(
+        filesToAdd.map((file) => prepareImage(file, share)),
+      )
       const prepared: Attachment[] = []
-      for (const [index, file] of filesToAdd.entries()) {
-        // Divide what is left by the files still to add, so one large photo cannot
-        // consume the whole budget and leave the rest unreadable. A file that needs
-        // less than its share leaves more for the next one.
-        const share = Math.floor(remaining / (filesToAdd.length - index))
-        if (share < MIN_ATTACHMENT_CHARS) {
-          pushToast(
-            'error',
-            'Those images are too large together. Remove one or add a smaller image.',
-          )
-          break
-        }
-        try {
-          const next = await prepareImage(file, share)
-          prepared.push(next)
-          remaining -= next.base64.length
-        } catch (err) {
+      for (const result of settled) {
+        if (result.status === 'fulfilled') {
+          prepared.push(result.value)
+        } else {
           const message =
-            err instanceof Error ? err.message : 'Could not read that image.'
+            result.reason instanceof Error
+              ? result.reason.message
+              : 'Could not read that image.'
           pushToast('error', message)
         }
       }
@@ -748,7 +398,8 @@ function App() {
       if (prepared.length > 0) {
         setAttachments((prev) => [...prev, ...prepared].slice(0, MAX_IMAGES))
         // A new input invalidates whatever is on the stage.
-        setResultUrl('')
+        setResultBlob(null)
+        replaceResultUrl('')
         setResultMeta('')
         setErrorText('')
         setLastPrompt('')
@@ -761,7 +412,7 @@ function App() {
         )
       }
     },
-    [attachments],
+    [attachments, replaceResultUrl],
   )
 
   useEffect(() => {
@@ -805,7 +456,8 @@ function App() {
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id))
-    setResultUrl('')
+    setResultBlob(null)
+    replaceResultUrl('')
     setResultMeta('')
     setLastPrompt('')
     setStatus('idle')
@@ -825,23 +477,28 @@ function App() {
     }
   }, [])
 
-  const showResult = useCallback((out: EditOutput, mode: Mode) => {
-    if (!out.imageBase64) return
-    warmed.current = true
-    lastResultAt.current = Date.now()
-    setResultUrl(`data:image/png;base64,${out.imageBase64}`)
-    setResultMeta(`${out.seconds}s · ${out.steps} steps`)
-    setResultModel(out.model ?? '')
-    setResultAlpha(out.transparent === true)
-    setStatus('done')
-    void refreshCredit()
-    if (out.seconds) {
-      pushToast(
-        'success',
-        `${mode === 'generate' ? 'Generated' : 'Edit ready'} in ${out.seconds}s.`,
-      )
-    }
-  }, [])
+  const showResult = useCallback(
+    (out: EditOutput, mode: Mode) => {
+      if (!out.imageBase64) return
+      const blob = base64ToBlob(out.imageBase64)
+      warmed.current = true
+      lastResultAt.current = Date.now()
+      setResultBlob(blob)
+      replaceResultUrl(URL.createObjectURL(blob))
+      setResultMeta(`${out.seconds}s · ${out.steps} steps`)
+      setResultModel(out.model ?? '')
+      setResultAlpha(out.transparent === true)
+      setStatus('done')
+      void refreshCredit()
+      if (out.seconds) {
+        pushToast(
+          'success',
+          `${mode === 'generate' ? 'Generated' : 'Edit ready'} in ${out.seconds}s.`,
+        )
+      }
+    },
+    [replaceResultUrl],
+  )
 
   /**
    * Ask the backend for a render whose reply never arrived.
@@ -946,7 +603,6 @@ function App() {
     warmed.current = Date.now() - lastResultAt.current < WARM_WINDOW_MS
     const jobId = crypto.randomUUID()
     rememberJob({ id: jobId, prompt: instruction, mode, at: Date.now() })
-    setElapsed(0)
     setErrorText('')
     setLastPrompt(instruction)
     setLastMode(mode)
@@ -960,7 +616,9 @@ function App() {
         mode === 'edit'
           ? await editImage({
               data: {
-                imagesBase64: attachments.map((a) => a.base64),
+                imagesBase64: attachments.map(
+                  (a) => a.previewUrl.split(',')[1] ?? '',
+                ),
                 prompt: instruction,
                 seed,
                 transparent,
@@ -1032,7 +690,8 @@ function App() {
     // Starting over also gives up the claim on any render still in flight.
     rememberJob(null)
     setPrompt('')
-    setResultUrl('')
+    setResultBlob(null)
+    replaceResultUrl('')
     setResultMeta('')
     setErrorText('')
     setLastPrompt('')
@@ -1041,15 +700,15 @@ function App() {
   }
 
   const continueFromResult = async () => {
-    if (!resultUrl) return
+    if (!resultBlob) return
     try {
-      const blob = await fetch(resultUrl).then((response) => response.blob())
       const next = await prepareImage(
-        new File([blob], 'edited.png', { type: 'image/png' }),
+        new File([resultBlob], 'edited.png', { type: 'image/png' }),
       )
       setAttachments([next])
       setPrompt('')
-      setResultUrl('')
+      setResultBlob(null)
+      replaceResultUrl('')
       setResultMeta('')
       setLastPrompt('')
       setStatus('idle')
@@ -1063,15 +722,14 @@ function App() {
   }
 
   const download = () => {
-    if (!resultUrl) return
+    if (!resultBlob) return
     const name = `${resultAlpha ? 'transparent' : 'edited'}-${Date.now()}.png`
 
-    // Decoded synchronously so the iOS branch below can still call share() inside
-    // the tap gesture; elsewhere it doubles as the Blob behind the download.
-    const file = dataUrlToFile(resultUrl, name)
+    // The Blob is already in memory, so wrapping it in a File is synchronous and
+    // the iOS branch can still call share() inside the tap gesture.
+    const file = new File([resultBlob], name, { type: 'image/png' })
 
     if (
-      file &&
       needsShareSheet() &&
       typeof navigator.canShare === 'function' &&
       navigator.canShare({ files: [file] })
@@ -1098,7 +756,7 @@ function App() {
     // An object URL, not the data: URL. Safari has ignored `download` on data: URLs
     // long enough that relying on it is a coin flip, and a Blob URL is what every
     // browser treats as an ordinary file.
-    const href = file ? URL.createObjectURL(file) : resultUrl
+    const href = URL.createObjectURL(file)
     const a = document.createElement('a')
     a.href = href
     a.download = name
@@ -1108,7 +766,7 @@ function App() {
     a.remove()
     // Revoking immediately can cancel the save in some browsers; a few seconds is
     // long enough for the download to have started reading.
-    if (file) setTimeout(() => URL.revokeObjectURL(href), 10_000)
+    setTimeout(() => URL.revokeObjectURL(href), 10_000)
     pushToast('success', 'Download started.')
   }
 
@@ -1117,7 +775,7 @@ function App() {
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
-  const promptWantsTransparent = WANTS_TRANSPARENT.test(prompt)
+  const promptWantsTransparent = wantsTransparent(prompt)
   const transparent = transparentOverride ?? promptWantsTransparent
   const transparentTitle = transparent
     ? transparentOverride === null
@@ -1146,19 +804,23 @@ function App() {
           void addFiles(e.dataTransfer.files)
         }}
       >
+        <p className="sr-only" aria-live="polite">
+          {done
+            ? `${lastMode === 'edit' ? 'Edit' : 'Image'} ready. ${resultMeta}`
+            : ''}
+        </p>
+
         {preview || resultUrl || running ? (
           <div className="thread">
             {lastPrompt && <p className="bubble">{lastPrompt}</p>}
 
             {running ? (
-              <Sketching
-                elapsed={elapsed}
-                warmed={warmed.current}
-                mode={lastMode}
-              />
+              <Sketching warmed={warmed.current} mode={lastMode} />
             ) : (
               <>
                 <figure
+                  ref={resultRef}
+                  tabIndex={-1}
                   className={`frame${done && resultAlpha ? ' is-alpha' : ''}`}
                 >
                   {done && preview ? (

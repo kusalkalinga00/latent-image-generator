@@ -175,18 +175,20 @@ gpu_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
     .uv_pip_install(
-        "torch",
+        # Upper bounds only: this image is built by pip, not from uv.lock, so a
+        # major bump is the one that can silently break the pipeline.
+        "torch>=2.6,<3",
         # Required, and required invisibly: the pipeline's Qwen2.5-VL processor
         # imports Torchvision lazily at load time, so the image builds happily
         # without it and the model then dies on the GPU.
-        "torchvision",
+        "torchvision>=0.21,<1",
         # 0.41.0 ships QwenImage21Pipeline, so a pinned release is reproducible.
         "diffusers==0.41.0",
         # Also invisible until load time: diffusers raises "PEFT backend is
         # required for load_lora_weights()" only when the LoRA is attached, so the
         # image builds and the pipeline constructs fine without it.
         "peft",
-        "transformers>=5.17",  # 2.1's requirement, per its Quick Start
+        "transformers>=5.17,<6",  # 2.1's requirement, per its Quick Start
         "accelerate",
         "safetensors",
         "sentencepiece",
@@ -388,6 +390,10 @@ def volume_stats() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _clamp_alpha(value: float) -> float:
+    return 0 if value < ALPHA_CLAMP else value
+
+
 def _snap_alpha(png: bytes) -> bytes:
     """Clamp the faint background haze to fully transparent.
 
@@ -397,12 +403,10 @@ def _snap_alpha(png: bytes) -> bytes:
     """
     from PIL import Image
 
-    image = Image.open(io.BytesIO(png))
+    image: Image.Image = Image.open(io.BytesIO(png))
     if image.mode != "RGBA":
         image = image.convert("RGBA")
-    alpha = image.getchannel("A").point(
-        lambda value: 0 if value < ALPHA_CLAMP else value
-    )
+    alpha = image.getchannel("A").point(_clamp_alpha)
     image.putalpha(alpha)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -435,7 +439,7 @@ def _useful_alpha(png: bytes) -> bool:
     if image.mode != "RGBA":
         return False
     low, _high = image.getchannel("A").getextrema()
-    return low < 250
+    return isinstance(low, (int, float)) and low < 250
 
 
 @app.cls(
