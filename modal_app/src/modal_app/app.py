@@ -869,12 +869,15 @@ def smoke_generate(
 
 
 @app.local_entrypoint()
-def selftest(image: str = "inputs/ref.png") -> None:
+def selftest(image: str = "web/public/sample.png") -> None:
     """Every path in one container: generate, generate + alpha, edit.
 
     Three renders, one cold start. This is the check that a change to the request
     shape, the LoRA or the alpha handling did not break one branch while the others
     kept working - the smoke entry points each exercise only one.
+
+    The default source is the sample that ships with the web app, so this works on
+    a clean checkout: ``inputs/`` is gitignored and a fresh clone has nothing there.
 
         uv run --package modal-app modal run modal_app/src/modal_app/app.py::selftest
     """
@@ -882,7 +885,10 @@ def selftest(image: str = "inputs/ref.png") -> None:
 
     out_dir = pathlib.Path("outputs")
     out_dir.mkdir(exist_ok=True)
-    source = pathlib.Path(image).read_bytes()
+    source_path = pathlib.Path(image)
+    if not source_path.is_file():
+        raise SystemExit(f"not a file: {image} - pass --image with a readable photo")
+    source = source_path.read_bytes()
 
     runs = [
         ("generate-wide", "a red fox in fresh snow, cinematic", "16:9", [], False),
