@@ -574,6 +574,10 @@ IDLE_SECONDS = Decimal("60")
 CREDIT_CACHE_KEY = "credit:snapshot"
 CREDIT_CACHE_TTL_S = 5 * 60
 
+# Stop renting GPUs once the monthly grant is this low. The last dollar is a
+# buffer for the render already in flight, not budget for another one.
+MIN_CREDIT_USD = Decimal("1.00")
+
 
 def _adjustment(summary: Any, name: str) -> Decimal:
     for key, value in summary.adjustments.items():
@@ -679,6 +683,26 @@ def _invalidate_credit_cache() -> None:
         RATES.pop(CREDIT_CACHE_KEY, None)
     except Exception as exc:  # noqa: BLE001
         print(f"[image-editor] credit cache clear failed: {type(exc).__name__}: {exc}")
+
+
+def _credit_gate() -> tuple[bool, str | None]:
+    """Refuse to start a render once the monthly grant is nearly spent.
+
+    A failed snapshot allows the render: the same best-effort rule as the rate
+    limit. An outage should not also stop the app.
+    """
+    snapshot = _cached_credit()
+    if not snapshot.get("ok"):
+        return True, None
+    remaining = snapshot.get("remaining_usd")
+    if not isinstance(remaining, (int, float)):
+        return True, None
+    if Decimal(str(remaining)) < MIN_CREDIT_USD:
+        return False, (
+            "The studio has used its monthly GPU credit. "
+            "Renders resume when the credit resets."
+        )
+    return True, None
 
 
 def _rate_limit(ip: str) -> tuple[bool, int]:
@@ -910,6 +934,12 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
                 f"Try again in about {hours} hour{'s' if hours != 1 else ''}."
             ),
         }
+
+    # The monthly grant is the real ceiling. Check it before the per-address
+    # window so an exhausted budget does not consume someone's hourly slot.
+    credit_ok, credit_error = _credit_gate()
+    if not credit_ok:
+        return {"ok": False, "limited": True, "error": credit_error}
 
     # Counted before the render, after the validation above: a rejected request
     # must not spend someone's quota, and a render must not start without one.
