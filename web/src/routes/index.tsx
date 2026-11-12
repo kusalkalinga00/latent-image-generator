@@ -347,8 +347,14 @@ const EXAMPLES = [
 interface Attachment {
   id: string
   name: string
+  /** The data URL is the only copy: its payload is sent at request time. */
   previewUrl: string
-  base64: string
+}
+
+/** Encoded characters in a data URL, without the `data:...;base64,` prefix. */
+function encodedChars(dataUrl: string) {
+  const comma = dataUrl.indexOf(',')
+  return comma === -1 ? 0 : dataUrl.length - comma - 1
 }
 
 /**
@@ -412,8 +418,7 @@ async function prepareImage(
     canvas.height = height
     ctx.drawImage(bitmap, 0, 0, width, height)
     dataUrl = encodeCanvas(canvas)
-    const chars = dataUrl.length - dataUrl.indexOf(',') - 1
-    if (chars <= budgetChars) break
+    if (encodedChars(dataUrl) <= budgetChars) break
     if (attempt >= 5) {
       bitmap.close()
       throw new Error(
@@ -425,14 +430,14 @@ async function prepareImage(
   }
   bitmap.close()
 
-  const base64 = dataUrl.split(',')[1] ?? ''
-  if (!base64) throw new Error(`${file.name} could not be prepared.`)
+  if (!encodedChars(dataUrl)) {
+    throw new Error(`${file.name} could not be prepared.`)
+  }
 
   return {
     id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: file.name,
     previewUrl: dataUrl,
-    base64,
   }
 }
 
@@ -717,7 +722,7 @@ function App() {
       // The budget is shared by every attachment, not per image: the request body
       // carries all of them, and Vercel caps the body, not each part.
       const existingChars = attachments.reduce(
-        (sum, item) => sum + item.base64.length,
+        (sum, item) => sum + encodedChars(item.previewUrl),
         0,
       )
       let remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
@@ -739,7 +744,7 @@ function App() {
         try {
           const next = await prepareImage(file, share)
           prepared.push(next)
-          remaining -= next.base64.length
+          remaining -= encodedChars(next.previewUrl)
         } catch (err) {
           const message =
             err instanceof Error ? err.message : 'Could not read that image.'
@@ -961,7 +966,9 @@ function App() {
         mode === 'edit'
           ? await editImage({
               data: {
-                imagesBase64: attachments.map((a) => a.base64),
+                imagesBase64: attachments.map(
+                  (a) => a.previewUrl.split(',')[1] ?? '',
+                ),
                 prompt: instruction,
                 seed,
                 transparent,
