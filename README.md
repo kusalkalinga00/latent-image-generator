@@ -518,11 +518,12 @@ Failures are JSON with `ok: false` and a one-line `error`, never an opaque 500 �
 distinguishes "your token is wrong" (HTTP 401 from proxy auth) from "the model failed" (200 with
 `ok: false`) by shape alone.
 
-One refusal is not a failure: when the per-address limit is spent the response carries
-`limited: true` and `retry_after`, and the message says how long. The limit lives here rather than
-in the web app because the count has to be shared across containers — an in-process counter would
-reset on every cold start — and the address itself has to be forwarded, since Vercel's egress is
-the only address this endpoint can see.
+One refusal is not a failure: when the per-address limit is spent, the global daily cap is reached,
+or the monthly credit is below $1, the response carries `limited: true` (plus `retry_after` where a
+wait helps), and the message says why. The counts live here rather than in the web app because they
+have to be shared across containers — an in-process counter would reset on every cold start — and
+the address itself has to be forwarded, since Vercel's egress is the only address this endpoint can
+see.
 
 ### Transparency is generation, not post-processing
 
@@ -613,7 +614,7 @@ because it assumes the GPU is already warm. The honest planning numbers are the 
 | `scaledown_window` raised | Every idle minute after the last edit is billed |
 | `min_containers` set | A permanently warm H100 is **$2,848/month** |
 | Alternating edit ↔ generate | Each switch pays a full cold start once the other container has scaled down |
-| A shared public link | No rate limit exists; the $30 is the only ceiling |
+| A shared public link | Three guards cap it: 10/hour per address, 50/day globally, and no new renders below $1 of credit |
 
 GPU memory snapshots are **not** used: Modal's docs state they "do not speed up model loading
 from storage" and may worsen it, and for a 53.76 GiB checkpoint initialisation is entirely
@@ -780,6 +781,9 @@ Model and runtime constants live in `app.py` and are meant to be edited there:
 | `MAX_IMAGES` | 4 | reference images per edit (2.1 accepts 10; the cap is payload) |
 | `RATE_LIMIT_MAX` | 10 | renders per address per window |
 | `RATE_LIMIT_WINDOW_S` | 3600 | the window, a sliding hour |
+| `DAILY_RENDER_MAX` | 50 | renders per UTC day across the whole app |
+| `MIN_CREDIT_USD` | 1.00 | no new renders below this remaining credit |
+| `CREDIT_CACHE_TTL_S` | 300 | how long a billing snapshot is reused |
 | `ASPECTS` | 7 buckets, all multiples of 32 | what the pipeline can actually produce |
 | `MAX_EDGE` (web) | 1536 px | client-side downscale before upload |
 | `MAX_UPLOAD_BYTES` (web) | 20 MB | rejected before decode |
@@ -881,12 +885,12 @@ render; both are logged (`2.1 + 4-step LoRA on GPU in Ns`), so the split is chec
   pretending otherwise.
 - **Non-commercial only.** The weights are research-licensed, so this cannot be sold or run for
   customers as-is — see [Licence](#licence).
-- **The rate limit is per address, and addresses are easy to have more than one of.** 10 renders an
-  hour, counted in the Modal API against the address the web app forwards. That stops a casual
-  loop on one connection; it does not stop anyone determined, and the $30 credit is still the real
-  ceiling.
-- **The credit chip is optimistic.** It estimates from the warm edit cost and ignores cold
-  starts and the idle tail.
+- **The guards are limits, not authentication.** 10 renders an hour per address, 50 a day globally,
+  and a hard stop below $1 of remaining credit. That stops a casual loop and a shared link; it does
+  not stop anyone determined, and the $30 credit is still the real ceiling.
+- **The credit chip is public on purpose.** This runs on Modal's free tier, so the budget is part of
+  the product. The chip is optimistic: it estimates from the warm edit cost and ignores cold starts
+  and the idle tail.
 - **No history.** One result at a time, and `Start over` discards it on purpose. The result store
   is a recovery mechanism, not an album: entries expire after 45 minutes and are pruned on write.
 - **Recovery has a budget.** A lost reply is chased for about a minute. If the render takes longer

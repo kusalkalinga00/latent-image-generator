@@ -91,9 +91,18 @@ RESULTS_TTL_S = 45 * 60
 # address is forwarded in the payload, and the count lives in a Modal Dict because
 # the API function is not pinned to one container: an in-process counter would
 # reset on every cold start and would never see another instance's traffic.
+#
+# The same Dict also carries the global daily counter ("global:...") and the credit
+# snapshot ("credit:..."), so per-address keys are prefixed "ip:" to keep the
+# namespaces from colliding.
 RATE_LIMIT_NAME = "image-editor-rate"
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW_S = 60 * 60
+
+# A global ceiling, separate from the per-address one: a link that escapes is many
+# addresses. This is a safety net, not the budget itself - the credit gate is the
+# real limit. Counted in UTC so the reset is predictable.
+DAILY_RENDER_MAX = 50
 
 # The 4-step distilled LoRA: 64 MiB, published for 2.1 specifically. It declares no
 # licence of its own and inherits the base model's research licence - see the
@@ -564,6 +573,15 @@ WARM_EDIT_SECONDS = Decimal("3.73")
 # scaledown_window: the GPU stays up this long after the last render.
 IDLE_SECONDS = Decimal("60")
 
+# The header chip asks for the balance on every page load, and the billing summary
+# is an API call. Reuse one snapshot for five minutes across API containers.
+CREDIT_CACHE_KEY = "credit:snapshot"
+CREDIT_CACHE_TTL_S = 5 * 60
+
+# Stop renting GPUs once the monthly grant is this low. The last dollar is a
+# buffer for the render already in flight, not budget for another one.
+MIN_CREDIT_USD = Decimal("1.00")
+
 
 def _adjustment(summary: Any, name: str) -> Decimal:
     for key, value in summary.adjustments.items():
@@ -627,6 +645,70 @@ RESULTS = modal.Volume.from_name(RESULTS_VOLUME_NAME, create_if_missing=True)
 RATES = modal.Dict.from_name(RATE_LIMIT_NAME, create_if_missing=True)
 
 
+def _cached_credit() -> dict[str, Any]:
+    """Remaining credit, reused for CREDIT_CACHE_TTL_S across containers.
+
+    The billing summary is an API call, and the chip asks for it on every visit.
+    A shared cache turns a page load into a Dict read instead. Best-effort: if the
+    Dict is unavailable, ask billing directly, and never cache a failed snapshot.
+    """
+    now = time.time()
+    try:
+        cached = RATES.get(CREDIT_CACHE_KEY)
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        print(f"[image-editor] credit cache read failed: {type(exc).__name__}: {exc}")
+        cached = None
+
+    if isinstance(cached, dict):
+        try:
+            fresh = now - float(cached.get("at", 0)) < CREDIT_CACHE_TTL_S
+        except (TypeError, ValueError):
+            fresh = False
+        body = cached.get("body")
+        if fresh and isinstance(body, dict):
+            return body
+
+    try:
+        body = credit_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] credit snapshot failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "error": "Credit balance is unavailable."}
+
+    try:
+        RATES[CREDIT_CACHE_KEY] = {"at": now, "body": body}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] credit cache write failed: {type(exc).__name__}: {exc}")
+    return body
+
+
+def _invalidate_credit_cache() -> None:
+    """Drop the snapshot after a render so the next read reflects the spend."""
+    try:
+        RATES.pop(CREDIT_CACHE_KEY, None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] credit cache clear failed: {type(exc).__name__}: {exc}")
+
+
+def _credit_gate() -> tuple[bool, str | None]:
+    """Refuse to start a render once the monthly grant is nearly spent.
+
+    A failed snapshot allows the render: the same best-effort rule as the rate
+    limit. An outage should not also stop the app.
+    """
+    snapshot = _cached_credit()
+    if not snapshot.get("ok"):
+        return True, None
+    remaining = snapshot.get("remaining_usd")
+    if not isinstance(remaining, (int, float)):
+        return True, None
+    if Decimal(str(remaining)) < MIN_CREDIT_USD:
+        return False, (
+            "The studio has used its monthly GPU credit. "
+            "Renders resume when the credit resets."
+        )
+    return True, None
+
+
 def _rate_limit(ip: str) -> tuple[bool, int]:
     """10 renders an hour per address. Returns (allowed, retry_after_seconds).
 
@@ -638,7 +720,7 @@ def _rate_limit(ip: str) -> tuple[bool, int]:
     down an app whose only job is to make pictures. The worst case is the old
     behaviour: no limit.
     """
-    key = (ip or "unknown").strip()[:64]
+    key = f"ip:{(ip or 'unknown').strip()[:64]}"
     now = time.time()
 
     try:
@@ -661,6 +743,34 @@ def _rate_limit(ip: str) -> tuple[bool, int]:
         RATES[key] = stamps
     except Exception as exc:  # noqa: BLE001
         print(f"[image-editor] rate limit write failed: {type(exc).__name__}: {exc}")
+    return True, 0
+
+
+def _daily_limit() -> tuple[bool, int]:
+    """DAILY_RENDER_MAX renders a UTC day across every address.
+
+    The per-address limit stops a loop on one connection; this one stops a shared
+    link that reached many of them. Best-effort like the rest of the store: if the
+    Dict cannot be read, the render is allowed and the failure is logged.
+    """
+    now = time.time()
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    key = f"global:{day}"
+    try:
+        count = int(RATES.get(key) or 0)
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        print(f"[image-editor] daily limit read failed: {type(exc).__name__}: {exc}")
+        return True, 0
+
+    if count >= DAILY_RENDER_MAX:
+        # Seconds until the UTC day rolls over.
+        retry_after = int(86400 - (now % 86400)) + 1
+        return False, max(1, retry_after)
+
+    try:
+        RATES[key] = count + 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] daily limit write failed: {type(exc).__name__}: {exc}")
     return True, 0
 
 
@@ -814,6 +924,32 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     if job_id and not JOB_ID_RE.fullmatch(job_id):
         return {"ok": False, "error": "job_id is not valid"}
 
+    # The monthly grant is the real ceiling. Check it before either counter so an
+    # exhausted budget does not spend a daily or hourly slot on a refused request.
+    credit_ok, credit_error = _credit_gate()
+    if not credit_ok:
+        return {"ok": False, "limited": True, "error": credit_error}
+
+    # The per-address limit stops one connection; this global ceiling stops a
+    # shared link that reached many of them.
+    allowed, retry_after = _daily_limit()
+    if not allowed:
+        if retry_after < 3600:
+            minutes = max(1, (retry_after + 59) // 60)
+            wait = f"{minutes} minute{'s' if minutes != 1 else ''}"
+        else:
+            hours = (retry_after + 3599) // 3600
+            wait = f"{hours} hour{'s' if hours != 1 else ''}"
+        return {
+            "ok": False,
+            "limited": True,
+            "retry_after": retry_after,
+            "error": (
+                f"The studio has reached its {DAILY_RENDER_MAX}-render daily limit. "
+                f"Try again in about {wait}."
+            ),
+        }
+
     # Counted before the render, after the validation above: a rejected request
     # must not spend someone's quota, and a render must not start without one.
     # The limit is per address, per hour; the message says when it frees up.
@@ -837,7 +973,9 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         mode = "edit" if decoded else "generate"
     except Exception as exc:
         # Surface model failures as JSON rather than an opaque 500, so the web app
-        # can show the user what actually went wrong.
+        # can show the user what actually went wrong. The attempt may still have
+        # billed, so the cached balance is no longer trustworthy.
+        _invalidate_credit_cache()
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     body = {
@@ -856,6 +994,8 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     # Written before returning, so a client whose connection died mid-flight can
     # collect this render on resume rather than triggering a second one.
     _store_result(job_id, body)
+    # The spend just moved; make the next chip read or credit gate see it.
+    _invalidate_credit_cache()
     return body
 
 
@@ -891,12 +1031,11 @@ def result(job_id: str = "") -> dict[str, Any]:
 @app.function(image=api_image, timeout=60)
 @modal.fastapi_endpoint(method="GET", requires_proxy_auth=True)
 def usage() -> dict[str, Any]:
-    """This month's remaining credit. CPU only — it never starts a GPU."""
-    try:
-        return credit_snapshot()
-    except Exception as exc:
-        print(f"[image-editor] credit snapshot failed: {type(exc).__name__}: {exc}")
-        return {"ok": False, "error": "Credit balance is unavailable."}
+    """This month's remaining credit, cached for a few minutes.
+
+    CPU only — it never starts a GPU.
+    """
+    return _cached_credit()
 
 
 # --------------------------------------------------------------------------- #

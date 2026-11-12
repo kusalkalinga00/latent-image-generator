@@ -5,9 +5,16 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react'
 import type { CSSProperties } from 'react'
-import { refreshCredit } from '#/lib/credit-store'
+import {
+  MIN_CREDIT_USD,
+  getCreditSnapshot,
+  getServerCreditSnapshot,
+  refreshCredit,
+  subscribeCredit,
+} from '#/lib/credit-store'
 import {
   ASPECT_LABELS,
   MAX_PROMPT_CHARS,
@@ -595,6 +602,18 @@ function App() {
   const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
 
+  // The chip is public on purpose - this is the free tier, and the budget is part
+  // of the product. The composer only pre-empts a render the server will refuse;
+  // a missing or failed snapshot is not a block, because the server is the
+  // authority and a billing outage should not stop the app.
+  const credit = useSyncExternalStore(
+    subscribeCredit,
+    getCreditSnapshot,
+    getServerCreditSnapshot,
+  )
+  const creditBlocked =
+    credit?.ok === true && (credit.remainingUsd ?? 0) < MIN_CREDIT_USD
+
   const inputRef = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   const runRef = useRef<() => void>(() => {})
@@ -911,6 +930,13 @@ function App() {
       return
     }
     if (statusRef.current === 'running') return
+    if (creditBlocked) {
+      pushToast(
+        'error',
+        'The studio has used its monthly GPU credit. Renders resume when it resets.',
+      )
+      return
+    }
 
     const id = ++runId.current
     const instruction = prompt.trim()
@@ -1288,6 +1314,16 @@ function App() {
       </main>
 
       <div className="dock">
+        {creditBlocked && (
+          <div className="notice is-error" role="status">
+            <span className="dot" aria-hidden="true" />
+            <span className="grow">
+              The studio has used its monthly GPU credit. Renders resume when it
+              resets.
+            </span>
+          </div>
+        )}
+
         {status === 'error' && errorText && (
           <div className="notice is-error" role="alert">
             <span className="dot" aria-hidden="true" />
@@ -1465,7 +1501,7 @@ function App() {
             <button
               type="submit"
               className="send"
-              disabled={!prompt.trim()}
+              disabled={!prompt.trim() || creditBlocked}
               aria-label={
                 attachments.length > 0 ? 'Edit the image' : 'Generate an image'
               }

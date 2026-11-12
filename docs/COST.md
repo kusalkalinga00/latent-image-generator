@@ -114,13 +114,22 @@ about running this app.
 
 ## What a shared link would cost
 
-There is no rate limit. Ten people making one edit each within a minute is one warm
-container doing ten edits — cheap. The same ten spread over an hour is ten cold
-starts plus ten idle minutes: roughly **$0.91 for ten renders**, and $30 lasts about a
-week of casual sharing.
+The deployed app has three guards, all enforced in the Modal API:
 
-Before making this public, add a per-IP limit to the server function. Nothing else
-in the design protects the credit.
+- **10 renders an hour per address.** Stops a loop on one connection.
+- **50 renders a UTC day across the whole app.** Stops a link that reaches many
+  addresses.
+- **No new renders below $1 of monthly credit.** The chip is public on purpose —
+  this is the free tier — but the server will not rent another H100 once the grant
+  is nearly gone.
+
+Ten people making one edit each within a minute is still one warm container doing
+ten edits — cheap. The same ten spread over an hour is ten cold starts plus ten
+idle minutes: roughly **$0.91 for ten renders**. The guards cap the worst case; they
+do not make sharing free.
+
+The balance is read through a five-minute cache, so a page load is a Dict read
+rather than a billing API call.
 
 ## The cost of the debugging that got here
 
