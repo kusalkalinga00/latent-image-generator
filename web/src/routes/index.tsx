@@ -25,6 +25,8 @@ import {
 } from '#/lib/edit'
 import type { Aspect, EditOutput } from '#/lib/edit'
 import { pushToast } from '#/lib/toast'
+import { wantsTransparent } from '#/lib/transparency'
+import { waitProgress, waitStep } from '#/lib/wait'
 
 export const Route = createFileRoute('/')({ component: App })
 
@@ -82,38 +84,6 @@ const DOT_ORDER = (() => {
   }
   return order
 })()
-
-function waitStep(elapsed: number, warmed: boolean) {
-  if (warmed || elapsed >= 30) return 2
-  if (elapsed >= 8) return 1
-  return 0
-}
-
-function waitProgress(elapsed: number, warmed: boolean) {
-  // Never reaches 100: this is an estimate of a wait whose length depends on a
-  // cold start, so it stops short and the image arriving is the real completion.
-  if (warmed) return Math.min(92, 18 + (elapsed / 4) * 74)
-  if (elapsed < 8) return (elapsed / 8) * 30
-  if (elapsed < 30) return 30 + ((elapsed - 8) / 22) * 40
-  return Math.min(92, 70 + ((elapsed - 30) / 20) * 22)
-}
-
-// Short enough to scan as chips; the point is to show the range of edits, not to
-// write the prompt for the user.
-/**
- * Does the prompt ask for an image with no background?
- *
- * These are phrases about the *output* file, not about anything inside the
- * picture, and the distinction is load-bearing now that transparency is a
- * generation parameter rather than a post-step: a match here rewrites the request
- * so the model spends its four steps drawing an alpha channel. A bare
- * "transparent" used to be a harmless false positive — it produced a cutout from
- * an otherwise normal render — but "a transparent glass of water" would now come
- * back as a cutout of a glass instead of the photograph the user asked for. So
- * "transparent" only counts when it is about the background.
- */
-const WANTS_TRANSPARENT =
-  /\btransparent\s+(background|bg)\b|\brgba\b|\balpha\s+channel\b|\bwith\s+alpha\b|\bcut\s?-?out\b|\bno\s+background\b|remove\s+(the\s+)?background|\bplain\s+(white|solid)\s+background\b|isolated\s+on\s+(white|plain)/i
 
 /**
  * The transparency control, in two dresses: an icon inside the pill on wide
@@ -370,6 +340,8 @@ function base64ToBlob(base64: string, type = 'image/png'): Blob {
   return new Blob([bytes], { type })
 }
 
+// Short enough to scan as chips; the point is to show the range of edits, not to
+// write the prompt for the user.
 const EXAMPLES = [
   'Night with warm street lights',
   'Watercolour painting',
@@ -1200,7 +1172,7 @@ function App() {
   }
 
   const preview = attachments[0]?.previewUrl ?? ''
-  const promptWantsTransparent = WANTS_TRANSPARENT.test(prompt)
+  const promptWantsTransparent = wantsTransparent(prompt)
   const transparent = transparentOverride ?? promptWantsTransparent
   const transparentTitle = transparent
     ? transparentOverride === null
