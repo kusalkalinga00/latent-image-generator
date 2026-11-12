@@ -21,7 +21,6 @@ import { getRequestIP } from '@tanstack/react-start/server'
 export interface EditInput {
   imagesBase64: string[]
   prompt: string
-  steps: number
   seed: number
   transparent?: boolean
   /** Client-chosen id, so the render can be collected if the reply is lost. */
@@ -30,7 +29,6 @@ export interface EditInput {
 
 export interface GenerateInput {
   prompt: string
-  steps: number
   seed: number
   aspect: Aspect
   transparent?: boolean
@@ -77,6 +75,18 @@ export interface EditOutput {
   error?: string
 }
 
+/**
+ * The total encoded size of every attachment in one request.
+ *
+ * Vercel rejects a body over 4.5MB before this code runs, and base64 adds a third,
+ * so this has to be a budget for the whole request - not a cap per image. Four
+ * images at 3.4M each was 13.6MB and could never have survived the trip.
+ */
+const MAX_TOTAL_ATTACHMENT_CHARS = 3_400_000
+
+/** One limit for both jobs: the model sees the same text either way. */
+export const MAX_PROMPT_CHARS = 2000
+
 /** The buckets the model was trained at; off-bucket sizes cost quality. */
 export const ASPECTS = [
   '1:1',
@@ -100,7 +110,6 @@ export const ASPECT_LABELS: Partial<Record<Aspect, string>> = {
 interface ModalPayload {
   image_b64: string[]
   prompt: string
-  steps: number
   seed: number
   aspect?: string
   transparent?: boolean
@@ -258,11 +267,22 @@ export const editImage = createServerFn({ method: 'POST' })
         'One of the images could not be read. Try a different file.',
       )
     }
+    const totalChars = data.imagesBase64.reduce(
+      (sum, image) => sum + image.length,
+      0,
+    )
+    if (totalChars > MAX_TOTAL_ATTACHMENT_CHARS) {
+      return failed(
+        'Those images are too large together. Try fewer or smaller images.',
+      )
+    }
     if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
       return failed('Describe the edit you want.')
     }
-    if (!Number.isInteger(data.steps) || data.steps < 4 || data.steps > 20) {
-      return failed('Steps must be between 4 and 20.')
+    if (data.prompt.length > MAX_PROMPT_CHARS) {
+      return failed(
+        `That prompt is too long. Keep it under ${MAX_PROMPT_CHARS} characters.`,
+      )
     }
     if (!Number.isFinite(data.seed)) {
       return failed('Seed must be a number.')
@@ -272,7 +292,6 @@ export const editImage = createServerFn({ method: 'POST' })
       {
         image_b64: data.imagesBase64,
         prompt: data.prompt.trim(),
-        steps: data.steps,
         seed: data.seed,
         transparent: data.transparent === true,
         job_id: data.jobId,
@@ -287,14 +306,13 @@ export const generateImage = createServerFn({ method: 'POST' })
     if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
       return failed('Describe the image you want.')
     }
-    if (data.prompt.length > 2000) {
-      return failed('That prompt is too long. Keep it under 2000 characters.')
+    if (data.prompt.length > MAX_PROMPT_CHARS) {
+      return failed(
+        `That prompt is too long. Keep it under ${MAX_PROMPT_CHARS} characters.`,
+      )
     }
     if (!ASPECTS.includes(data.aspect)) {
       return failed('Pick a shape for the image.')
-    }
-    if (!Number.isInteger(data.steps) || data.steps < 4 || data.steps > 20) {
-      return failed('Steps must be between 4 and 20.')
     }
     if (!Number.isFinite(data.seed)) {
       return failed('Seed must be a number.')
@@ -304,7 +322,6 @@ export const generateImage = createServerFn({ method: 'POST' })
       {
         image_b64: [],
         prompt: data.prompt.trim(),
-        steps: data.steps,
         seed: data.seed,
         aspect: data.aspect,
         transparent: data.transparent === true,

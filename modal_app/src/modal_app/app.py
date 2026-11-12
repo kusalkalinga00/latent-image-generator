@@ -126,12 +126,21 @@ DEFAULT_ASPECT = "1:1"
 # model will not use.
 MAX_IMAGES = 4
 
+# Validation happens before the GPU class is called, so a corrupt payload cannot
+# bill a cold start just to fail inside Image.open. The web app keeps requests far
+# below these; they are the outer bounds for a direct API client.
+MAX_PROMPT_CHARS = 2000
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024
+# 2048² is the largest size this deployment was measured at (60.7 GB peak VRAM);
+# anything beyond it is a GPU OOM waiting to happen, not a render.
+MAX_IMAGE_PIXELS = 4_200_000
+JOB_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
+
 # The distillation is four steps; that is the whole point of the LoRA, and the UI
-# offers no slider. ``steps`` stays in the request and is echoed back, but the
-# render always runs the distilled schedule - a "40 steps" request would silently
-# get 4 rather than pay for 40.
+# offers no slider. The request has no steps field, so a "40 steps" request cannot
+# be mistaken for work the model will actually do. The response echoes the 4 it ran.
 LIGHTNING_STEPS = 4
-DEFAULT_STEPS = LIGHTNING_STEPS
 # The distillation's own schedule: four sigmas, no terminal stretch.
 LIGHTNING_SIGMAS = [1.0, 0.75, 0.5, 0.25]
 
@@ -464,14 +473,11 @@ class Image21:
         self,
         prompt: str,
         aspect: str = DEFAULT_ASPECT,
-        images: list[str] | None = None,
-        steps: int = LIGHTNING_STEPS,
+        images: list[bytes] | None = None,
         seed: int = 0,
         transparent: bool = False,
     ) -> dict[str, Any]:
         """Edit if images arrive, generate if not. One model, one code path."""
-        import base64
-
         import torch
         from PIL import Image
 
@@ -485,8 +491,7 @@ class Image21:
         kwargs: dict[str, Any] = {}
         if images:
             decoded = [
-                Image.open(io.BytesIO(base64.b64decode(item))).convert("RGB")
-                for item in images
+                Image.open(io.BytesIO(item)).convert("RGB") for item in images
             ]
             # An edit inherits the source's size: the UI never offers a shape
             # picker for edits, and resizing a photo would be an unasked-for edit.
@@ -532,18 +537,14 @@ def _render(
     prompt: str,
     aspect: str,
     images: list[bytes],
-    steps: int,
     seed: int,
     transparent: bool,
 ) -> dict[str, Any]:
     """The one place that calls the GPU, shared by the API and the smoke tests."""
-    import base64
-
     return Image21().render.remote(
         prompt=prompt,
         aspect=aspect,
-        images=[base64.b64encode(item).decode("ascii") for item in images] or None,
-        steps=int(steps),
+        images=images or None,
         seed=int(seed),
         transparent=bool(transparent),
     )
@@ -663,6 +664,52 @@ def _rate_limit(ip: str) -> tuple[bool, int]:
     return True, 0
 
 
+def _decode_images(raw: list[str]) -> tuple[list[bytes], str | None]:
+    """Decode and validate reference images before a GPU is rented.
+
+    The GPU class used to be the first thing to open these bytes, so a truncated or
+    non-image payload failed only after a cold start had been billed. This runs on
+    the API's CPU container and hands the GPU images that are known to load.
+    """
+    if not raw:
+        return [], None
+
+    import base64
+
+    from PIL import Image
+
+    decoded: list[bytes] = []
+    total = 0
+    for index, item in enumerate(raw, start=1):
+        try:
+            data = base64.b64decode(item, validate=True)
+        except Exception as exc:  # noqa: BLE001 - reported as a request error
+            return [], f"image {index} is not valid base64: {type(exc).__name__}"
+        if len(data) > MAX_IMAGE_BYTES:
+            return [], (
+                f"image {index} is larger than "
+                f"{MAX_IMAGE_BYTES // (1024 * 1024)}MB"
+            )
+        total += len(data)
+        if total > MAX_TOTAL_IMAGE_BYTES:
+            return [], (
+                "the images together are larger than "
+                f"{MAX_TOTAL_IMAGE_BYTES // (1024 * 1024)}MB"
+            )
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    return [], (
+                        f"image {index} is larger than "
+                        f"{MAX_IMAGE_PIXELS // 1_000_000}MP; downscale it first"
+                    )
+                image.load()
+        except Exception as exc:  # noqa: BLE001
+            return [], f"image {index} could not be read: {type(exc).__name__}"
+        decoded.append(data)
+    return decoded, None
+
+
 def _jobs_path(job_id: str) -> str:
     # The id arrives from a client, so it is never trusted as a path segment.
     return os.path.join(RESULTS_PATH, re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:64] + ".json")
@@ -709,7 +756,7 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
 
         POST <url>
         Authorization: Bearer ***
-        {"image_b64": ["..."], "prompt": "...", "steps": 4, "seed": 0}
+        {"image_b64": ["..."], "prompt": "...", "seed": 0}
 
     One endpoint, two jobs, decided by whether a photo came with the prompt: no
     image means generate, an image means edit. That keeps the web app from having
@@ -732,6 +779,11 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     prompt = (payload.get("prompt") or "").strip()
     if not prompt:
         return {"ok": False, "error": "prompt is required"}
+    if len(prompt) > MAX_PROMPT_CHARS:
+        return {
+            "ok": False,
+            "error": f"prompt must be under {MAX_PROMPT_CHARS} characters",
+        }
 
     raw = payload.get("image_b64") or []
     if isinstance(raw, str):
@@ -740,9 +792,31 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     if len(raw) > MAX_IMAGES:
         return {"ok": False, "error": f"at most {MAX_IMAGES} images"}
 
-    # Counted before the render, after the cheap validation above: a rejected
-    # request must not spend someone's quota, and a render must not start without
-    # one. The limit is per address, per hour; the message says when it frees up.
+    # Decode and validate on this CPU container, before any GPU is rented: a bad
+    # image should cost milliseconds here, not a cold start there.
+    decoded, image_error = _decode_images(raw)
+    if image_error:
+        return {"ok": False, "error": image_error}
+
+    if raw:
+        aspect = DEFAULT_ASPECT
+    else:
+        aspect = str(payload.get("aspect") or DEFAULT_ASPECT)
+        if aspect not in ASPECTS:
+            return {"ok": False, "error": f"unknown aspect: {aspect}"}
+
+    try:
+        seed = int(payload.get("seed", 0))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "seed must be an integer"}
+
+    job_id = str(payload.get("job_id") or "")
+    if job_id and not JOB_ID_RE.fullmatch(job_id):
+        return {"ok": False, "error": "job_id is not valid"}
+
+    # Counted before the render, after the validation above: a rejected request
+    # must not spend someone's quota, and a render must not start without one.
+    # The limit is per address, per hour; the message says when it frees up.
     allowed, retry_after = _rate_limit(str(payload.get("client_ip") or "unknown"))
     if not allowed:
         minutes = max(1, (retry_after + 59) // 60)
@@ -756,22 +830,11 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    steps = payload.get("steps", DEFAULT_STEPS)
-    seed = payload.get("seed", 0)
     transparent = bool(payload.get("transparent"))
 
     try:
-        if raw:
-            try:
-                decoded = [base64.b64decode(item) for item in raw]
-            except Exception as exc:
-                return {"ok": False, "error": f"image_b64 is not valid base64: {exc}"}
-            out = _render(prompt, DEFAULT_ASPECT, decoded, steps, seed, transparent)
-            mode = "edit"
-        else:
-            aspect = str(payload.get("aspect") or DEFAULT_ASPECT)
-            out = _render(prompt, aspect, [], steps, seed, transparent)
-            mode = "generate"
+        out = _render(prompt, aspect, decoded, seed, transparent)
+        mode = "edit" if decoded else "generate"
     except Exception as exc:
         # Surface model failures as JSON rather than an opaque 500, so the web app
         # can show the user what actually went wrong.
@@ -792,7 +855,7 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Written before returning, so a client whose connection died mid-flight can
     # collect this render on resume rather than triggering a second one.
-    _store_result(str(payload.get("job_id") or ""), body)
+    _store_result(job_id, body)
     return body
 
 
@@ -855,7 +918,7 @@ def smoke_generate(
     import pathlib
 
     started = time.time()
-    out = _render(prompt, aspect, [], DEFAULT_STEPS, 0, transparent)
+    out = _render(prompt, aspect, [], 0, transparent)
 
     out_dir = pathlib.Path("outputs")
     out_dir.mkdir(exist_ok=True)
@@ -869,12 +932,15 @@ def smoke_generate(
 
 
 @app.local_entrypoint()
-def selftest(image: str = "inputs/ref.png") -> None:
+def selftest(image: str = "web/public/sample.png") -> None:
     """Every path in one container: generate, generate + alpha, edit.
 
     Three renders, one cold start. This is the check that a change to the request
     shape, the LoRA or the alpha handling did not break one branch while the others
     kept working - the smoke entry points each exercise only one.
+
+    The default source is the sample that ships with the web app, so this works on
+    a clean checkout: ``inputs/`` is gitignored and a fresh clone has nothing there.
 
         uv run --package modal-app modal run modal_app/src/modal_app/app.py::selftest
     """
@@ -882,7 +948,10 @@ def selftest(image: str = "inputs/ref.png") -> None:
 
     out_dir = pathlib.Path("outputs")
     out_dir.mkdir(exist_ok=True)
-    source = pathlib.Path(image).read_bytes()
+    source_path = pathlib.Path(image)
+    if not source_path.is_file():
+        raise SystemExit(f"not a file: {image} - pass --image with a readable photo")
+    source = source_path.read_bytes()
 
     runs = [
         ("generate-wide", "a red fox in fresh snow, cinematic", "16:9", [], False),
@@ -890,7 +959,7 @@ def selftest(image: str = "inputs/ref.png") -> None:
         ("edit", "turn the background into a sunset beach", DEFAULT_ASPECT, [source], False),
     ]
     for name, prompt, aspect, images, transparent in runs:
-        out = _render(prompt, aspect, images, DEFAULT_STEPS, 1, transparent)
+        out = _render(prompt, aspect, images, 1, transparent)
         target = out_dir / f"selftest-{name}.png"
         target.write_bytes(out["png"])
         print(
@@ -928,7 +997,7 @@ def smoke(
         raise SystemExit(f"not a file: {image_path}")
 
     out = _render(
-        prompt, DEFAULT_ASPECT, [image_path.read_bytes()], DEFAULT_STEPS, 0, transparent
+        prompt, DEFAULT_ASPECT, [image_path.read_bytes()], 0, transparent
     )
 
     out_dir = pathlib.Path("outputs")
@@ -948,7 +1017,6 @@ def batch_prompts(
     out_dir: str = "outputs/batch",
     aspect: str = DEFAULT_ASPECT,
     transparent: bool = True,
-    steps: int = DEFAULT_STEPS,
     seed: int = 7,
 ) -> None:
     """Render every prompt in a JSON list in ONE container.
@@ -972,7 +1040,6 @@ def batch_prompts(
             item["prompt"],
             item.get("aspect", aspect),
             [],
-            int(item.get("steps", steps)),
             int(item.get("seed", seed)),
             bool(item.get("transparent", transparent)),
         )

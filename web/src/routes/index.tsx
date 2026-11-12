@@ -10,6 +10,7 @@ import type { CSSProperties } from 'react'
 import { refreshCredit } from '#/lib/credit-store'
 import {
   ASPECT_LABELS,
+  MAX_PROMPT_CHARS,
   collectResult,
   editImage,
   generateImage,
@@ -23,20 +24,27 @@ const MAX_IMAGES = 4
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 const MAX_EDGE = 1536 // the model works around 1.5MP; larger just costs GPU seconds
 // Vercel rejects a serverless request body over 4.5MB with a 413 before the code
-// runs. Base64 inflates an image by 4/3, so the encoded string has to stay under
-// this, with room for the JSON around it.
-const MAX_ATTACHMENT_CHARS = 3_400_000
+// runs. Base64 inflates an image by 4/3, so the *total* encoded size across every
+// attachment has to stay under this, with room for the JSON around it. A per-image
+// cap is not enough: four images at the old cap were 13.6MB of base64.
+const MAX_TOTAL_ATTACHMENT_CHARS = 3_400_000
+// Below this an image is too small to be worth sending; shrinking further is a
+// worse answer than asking the user to remove one.
+const MIN_ATTACHMENT_CHARS = 64_000
 
 // The backend holds one model - Qwen-Image-2.1 with the 4-step Lightning LoRA - and
-// it does both generation and editing. There is no second "standard" path to switch
-// to, so steps are not a choice the UI can offer; passing 4 is the honest thing to
-// send.
-const STEPS = 4
+// it does both generation and editing. The four-step schedule is fixed server-side,
+// so there is no steps control and no steps field in the request.
 
 const WAIT_PHASES = {
   edit: ['Starting a GPU', 'Loading the model', 'Editing'],
   generate: ['Starting a GPU', 'Loading the model', 'Painting'],
 } as const
+
+// Modal keeps the container for 60s after the last render. Past that the next
+// call pays the weight load again, so the progress estimate has to fall back to
+// the cold curve instead of staying "warm" for the rest of the session.
+const WARM_WINDOW_MS = 90_000
 
 type Mode = 'edit' | 'generate'
 
@@ -244,6 +252,10 @@ function ShapeControl({
 
 /** localStorage key for a render that is still owed to this device. */
 const PENDING_KEY = 'image-editor:pending'
+// Matches RESULTS_TTL_S in modal_app/src/modal_app/app.py: the backend keeps a
+// finished render for 45 minutes, so forgetting the id at 30 only threw away
+// recovery time that was still there.
+const PENDING_MAX_AGE_MS = 45 * 60 * 1000
 
 interface PendingJob {
   id: string
@@ -355,11 +367,17 @@ function encodeCanvas(canvas: HTMLCanvasElement): string {
  * a 413 before the server function ever ran — which the app could only report as
  * "the edit did not finish". So the encoded size is enforced here, not assumed.
  */
-async function prepareImage(file: File): Promise<Attachment> {
+async function prepareImage(
+  file: File,
+  budgetChars = MAX_TOTAL_ATTACHMENT_CHARS,
+): Promise<Attachment> {
   if (file.size > MAX_UPLOAD_BYTES) {
     throw new Error(
       `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB, over the 20MB limit`,
     )
+  }
+  if (budgetChars < MIN_ATTACHMENT_CHARS) {
+    throw new Error('There is no room for another image. Remove one first.')
   }
 
   let bitmap: ImageBitmap
@@ -387,11 +405,11 @@ async function prepareImage(file: File): Promise<Attachment> {
     ctx.drawImage(bitmap, 0, 0, width, height)
     dataUrl = encodeCanvas(canvas)
     const chars = dataUrl.length - dataUrl.indexOf(',') - 1
-    if (chars <= MAX_ATTACHMENT_CHARS) break
+    if (chars <= budgetChars) break
     if (attempt >= 5) {
       bitmap.close()
       throw new Error(
-        `${file.name} is too detailed to send. Try a smaller image.`,
+        `${file.name} is too detailed to send with the images already attached. Remove one or try a smaller image.`,
       )
     }
     width = Math.max(1, Math.round(width * 0.8))
@@ -583,6 +601,7 @@ function App() {
   const statusRef = useRef(status)
   const runId = useRef(0)
   const warmed = useRef(false)
+  const lastResultAt = useRef(0)
   statusRef.current = status
 
   // The first run of a session loads 53.76 GiB into VRAM, which takes about 30s
@@ -674,10 +693,32 @@ function App() {
         return
       }
 
+      // The budget is shared by every attachment, not per image: the request body
+      // carries all of them, and Vercel caps the body, not each part.
+      const existingChars = attachments.reduce(
+        (sum, item) => sum + item.base64.length,
+        0,
+      )
+      let remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
+
+      const filesToAdd = incoming.slice(0, room)
       const prepared: Attachment[] = []
-      for (const file of incoming.slice(0, room)) {
+      for (const [index, file] of filesToAdd.entries()) {
+        // Divide what is left by the files still to add, so one large photo cannot
+        // consume the whole budget and leave the rest unreadable. A file that needs
+        // less than its share leaves more for the next one.
+        const share = Math.floor(remaining / (filesToAdd.length - index))
+        if (share < MIN_ATTACHMENT_CHARS) {
+          pushToast(
+            'error',
+            'Those images are too large together. Remove one or add a smaller image.',
+          )
+          break
+        }
         try {
-          prepared.push(await prepareImage(file))
+          const next = await prepareImage(file, share)
+          prepared.push(next)
+          remaining -= next.base64.length
         } catch (err) {
           const message =
             err instanceof Error ? err.message : 'Could not read that image.'
@@ -701,7 +742,7 @@ function App() {
         )
       }
     },
-    [attachments.length],
+    [attachments],
   )
 
   useEffect(() => {
@@ -768,6 +809,7 @@ function App() {
   const showResult = useCallback((out: EditOutput, mode: Mode) => {
     if (!out.imageBase64) return
     warmed.current = true
+    lastResultAt.current = Date.now()
     setResultUrl(`data:image/png;base64,${out.imageBase64}`)
     setResultMeta(`${out.seconds}s · ${out.steps} steps`)
     setResultModel(out.model ?? '')
@@ -841,7 +883,7 @@ function App() {
       rememberJob(null)
       return
     }
-    if (!job.id || Date.now() - job.at > 30 * 60 * 1000) {
+    if (!job.id || Date.now() - job.at > PENDING_MAX_AGE_MS) {
       rememberJob(null)
       return
     }
@@ -873,6 +915,9 @@ function App() {
     const id = ++runId.current
     const instruction = prompt.trim()
     const mode = attachments.length > 0 ? 'edit' : 'generate'
+    // Only a run inside the scaledown window reuses a warm container; after it,
+    // the next call pays the cold load and the estimate must say so.
+    warmed.current = Date.now() - lastResultAt.current < WARM_WINDOW_MS
     const jobId = crypto.randomUUID()
     rememberJob({ id: jobId, prompt: instruction, mode, at: Date.now() })
     setElapsed(0)
@@ -891,7 +936,6 @@ function App() {
               data: {
                 imagesBase64: attachments.map((a) => a.base64),
                 prompt: instruction,
-                steps: STEPS,
                 seed,
                 transparent,
                 jobId,
@@ -900,7 +944,6 @@ function App() {
           : await generateImage({
               data: {
                 prompt: instruction,
-                steps: STEPS,
                 seed,
                 aspect,
                 transparent,
@@ -914,6 +957,11 @@ function App() {
         // A lost connection is not a lost render: try to collect it before
         // telling the user anything went wrong.
         if (out.network && (await collect(jobId, mode, id))) return
+
+        // Anything else is a definitive refusal - validation, rate limit, or a
+        // model failure - and nothing was stored under this id. Keeping it would
+        // make the next reload poll for a render that never existed.
+        if (!out.network) rememberJob(null)
 
         const message =
           out.error ?? 'The edit did not finish. Try again in a moment.'
@@ -1364,6 +1412,7 @@ function App() {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={1}
+            maxLength={MAX_PROMPT_CHARS}
             placeholder={
               attachments.length > 0
                 ? 'Describe the change…'

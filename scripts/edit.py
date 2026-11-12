@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.request
 
-MAX_IMAGES = 3
+MAX_IMAGES = 4
 ASPECTS = ("1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16")
 
 
@@ -49,7 +49,7 @@ def main() -> int:
         "--image",
         action="append",
         default=[],
-        help="reference image (up to 3). Omit to generate from the prompt alone.",
+        help="reference image (up to 4). Omit to generate from the prompt alone.",
     )
     parser.add_argument("--prompt", required=True, help="what to change, or what to make")
     parser.add_argument(
@@ -59,8 +59,6 @@ def main() -> int:
         help="shape when generating; ignored when editing (default 1:1)",
     )
     parser.add_argument("--out", default="", help="output path (default outputs/<name>.png)")
-    parser.add_argument("--steps", type=int, default=4, help="4 is the distilled default")
-    parser.add_argument("--cfg", type=float, default=1.0, help="1.0 = guidance-free")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=900.0)
     args = parser.parse_args()
@@ -76,8 +74,6 @@ def main() -> int:
     payload = {
         "prompt": args.prompt,
         "image_b64": [base64.b64encode(p.read_bytes()).decode("ascii") for p in paths],
-        "steps": args.steps,
-        "cfg": args.cfg,
         "seed": args.seed,
     }
     # The endpoint routes on this: no images means generate.
