@@ -25,8 +25,11 @@ pnpm dev                  # http://localhost:3000
 
 | Path | What |
 |---|---|
-| `src/routes/index.tsx` | the whole studio: stage, composer, wait, result |
+| `src/routes/index.tsx` | the studio state machine, stage, and composer |
 | `src/routes/__root.tsx` | HTML shell, theme script, error + 404 |
+| `src/components/Sketching.tsx` | the wait timer and dot field |
+| `src/components/Compare.tsx` | the before/after wipe |
+| `src/components/ComposerControls.tsx` | transparency toggle and shape listbox |
 | `src/lib/edit.ts` | the only module that talks to Modal (server-only) |
 | `src/lib/credit.ts` | credit server function |
 | `src/lib/credit-store.ts` | credit cache + subscription |

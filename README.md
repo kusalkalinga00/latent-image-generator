@@ -362,6 +362,9 @@ image-editor/
 │   │   ├── components/
 │   │   │   ├── Header.tsx        chrome floated over the canvas
 │   │   │   ├── CreditChip.tsx    remaining credit, top right
+│   │   │   ├── Compare.tsx       before/after wipe
+│   │   │   ├── ComposerControls.tsx  transparency toggle + shape listbox
+│   │   │   ├── Sketching.tsx     the wait timer and dot field
 │   │   │   ├── ThemeToggle.tsx   light / dark / auto
 │   │   │   └── Toaster.tsx       transient messages
 │   │   ├── lib/
