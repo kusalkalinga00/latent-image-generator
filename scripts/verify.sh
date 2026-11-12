@@ -19,4 +19,5 @@ echo "== web =="
 echo "== python =="
 uv sync --all-packages --group dev --frozen
 uv run ruff check modal_app scripts
+uv run mypy
 uv run pytest

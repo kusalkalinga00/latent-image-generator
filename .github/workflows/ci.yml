@@ -71,6 +71,7 @@ jobs:
       # ruff. Nothing here imports torch or contacts Modal.
       - run: uv sync --all-packages --group dev --frozen
       - run: uv run ruff check modal_app scripts
+      - run: uv run mypy
       - run: uv run pytest
 
   secrets:
