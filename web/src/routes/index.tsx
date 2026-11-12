@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -495,15 +496,33 @@ function Compare({ before, after }: { before: string; after: string }) {
  * cold start somewhere to live: the caption names the phase, so 30 seconds of
  * loading reads as a step rather than a stall.
  */
-function Sketching({
-  elapsed,
-  warmed,
-  mode,
+const Dots = memo(function Dots({
+  cols,
+  filled,
 }: {
-  elapsed: number
-  warmed: boolean
-  mode: Mode
+  cols: number
+  filled: number
 }) {
+  return (
+    <>
+      {Array.from({ length: cols * DOT_ROWS }, (_, index) => {
+        const rank = DOT_ORDER[index % DOT_ORDER.length]
+        return <i key={index} className={rank < filled ? 'on' : undefined} />
+      })}
+    </>
+  )
+})
+
+function Sketching({ warmed, mode }: { warmed: boolean; mode: Mode }) {
+  // The timer lives here, not in App: a 4 fps tick should repaint the sketch,
+  // not the composer, the stage, and every attachment thumbnail.
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const started = Date.now()
+    const id = setInterval(() => setElapsed((Date.now() - started) / 1000), 250)
+    return () => clearInterval(id)
+  }, [])
+
   const phase = waitStep(elapsed, warmed)
   const progress = Math.round(waitProgress(elapsed, warmed))
   const label = WAIT_PHASES[mode][phase]
@@ -556,12 +575,7 @@ function Sketching({
           aria-valuenow={progress}
           aria-label={`${label}, ${progress}%`}
         >
-          {Array.from({ length: total }, (_, index) => {
-            const rank = DOT_ORDER[index % DOT_ORDER.length]
-            return (
-              <i key={index} className={rank < filled ? 'on' : undefined} />
-            )
-          })}
+          <Dots cols={cols} filled={filled} />
         </div>
         <span className="matrix-pct">{progress}%</span>
       </div>
@@ -599,7 +613,6 @@ function App() {
     boolean | null
   >(null)
   const [resultAlpha, setResultAlpha] = useState(false)
-  const [elapsed, setElapsed] = useState(0)
   const [dragging, setDragging] = useState(false)
 
   // The chip is public on purpose - this is the free tier, and the budget is part
@@ -622,17 +635,6 @@ function App() {
   const warmed = useRef(false)
   const lastResultAt = useRef(0)
   statusRef.current = status
-
-  // The first run of a session loads 53.76 GiB into VRAM, which takes about 30s
-  // before a single denoising step happens. A bare spinner for that reads as
-  // broken, so elapsed time stays on screen and the copy says what is happening.
-  useEffect(() => {
-    if (status !== 'running') return
-    setElapsed(0)
-    const started = Date.now()
-    const id = setInterval(() => setElapsed((Date.now() - started) / 1000), 100)
-    return () => clearInterval(id)
-  }, [status])
 
   const stageRef = useRef<HTMLElement>(null)
 
@@ -946,7 +948,6 @@ function App() {
     warmed.current = Date.now() - lastResultAt.current < WARM_WINDOW_MS
     const jobId = crypto.randomUUID()
     rememberJob({ id: jobId, prompt: instruction, mode, at: Date.now() })
-    setElapsed(0)
     setErrorText('')
     setLastPrompt(instruction)
     setLastMode(mode)
@@ -1151,11 +1152,7 @@ function App() {
             {lastPrompt && <p className="bubble">{lastPrompt}</p>}
 
             {running ? (
-              <Sketching
-                elapsed={elapsed}
-                warmed={warmed.current}
-                mode={lastMode}
-              />
+              <Sketching warmed={warmed.current} mode={lastMode} />
             ) : (
               <>
                 <figure
