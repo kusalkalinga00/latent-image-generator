@@ -683,6 +683,7 @@ function App() {
   statusRef.current = status
 
   const stageRef = useRef<HTMLElement>(null)
+  const resultRef = useRef<HTMLElement>(null)
 
   // When a result arrives the thread is usually taller than the stage on a phone
   // with browser toolbars, and the natural resting position is the top — which
@@ -694,11 +695,21 @@ function App() {
     const pin = () => {
       if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight
     }
+    const focusResult = () => {
+      // Do not steal focus from someone already typing the next prompt.
+      const active = document.activeElement
+      if (!active || active === document.body || active.tagName === 'BUTTON') {
+        resultRef.current?.focus({ preventScroll: true })
+      }
+    }
     // The image is decoded after paint, so one frame is too early to measure the
     // thread; a second frame plus a short settle covers the decode.
     const first = requestAnimationFrame(() => {
       pin()
-      requestAnimationFrame(pin)
+      requestAnimationFrame(() => {
+        pin()
+        focusResult()
+      })
     })
     const settle = window.setTimeout(pin, 250)
     return () => {
@@ -1218,6 +1229,12 @@ function App() {
           void addFiles(e.dataTransfer.files)
         }}
       >
+        <p className="sr-only" aria-live="polite">
+          {done
+            ? `${lastMode === 'edit' ? 'Edit' : 'Image'} ready. ${resultMeta}`
+            : ''}
+        </p>
+
         {preview || resultUrl || running ? (
           <div className="thread">
             {lastPrompt && <p className="bubble">{lastPrompt}</p>}
@@ -1227,6 +1244,8 @@ function App() {
             ) : (
               <>
                 <figure
+                  ref={resultRef}
+                  tabIndex={-1}
                   className={`frame${done && resultAlpha ? ' is-alpha' : ''}`}
                 >
                   {done && preview ? (
