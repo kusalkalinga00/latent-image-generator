@@ -564,6 +564,11 @@ WARM_EDIT_SECONDS = Decimal("3.73")
 # scaledown_window: the GPU stays up this long after the last render.
 IDLE_SECONDS = Decimal("60")
 
+# The header chip asks for the balance on every page load, and the billing summary
+# is an API call. Reuse one snapshot for five minutes across API containers.
+CREDIT_CACHE_KEY = "credit:snapshot"
+CREDIT_CACHE_TTL_S = 5 * 60
+
 
 def _adjustment(summary: Any, name: str) -> Decimal:
     for key, value in summary.adjustments.items():
@@ -625,6 +630,50 @@ def credit_snapshot() -> dict[str, Any]:
 
 RESULTS = modal.Volume.from_name(RESULTS_VOLUME_NAME, create_if_missing=True)
 RATES = modal.Dict.from_name(RATE_LIMIT_NAME, create_if_missing=True)
+
+
+def _cached_credit() -> dict[str, Any]:
+    """Remaining credit, reused for CREDIT_CACHE_TTL_S across containers.
+
+    The billing summary is an API call, and the chip asks for it on every visit.
+    A shared cache turns a page load into a Dict read instead. Best-effort: if the
+    Dict is unavailable, ask billing directly, and never cache a failed snapshot.
+    """
+    now = time.time()
+    try:
+        cached = RATES.get(CREDIT_CACHE_KEY)
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        print(f"[image-editor] credit cache read failed: {type(exc).__name__}: {exc}")
+        cached = None
+
+    if isinstance(cached, dict):
+        try:
+            fresh = now - float(cached.get("at", 0)) < CREDIT_CACHE_TTL_S
+        except (TypeError, ValueError):
+            fresh = False
+        body = cached.get("body")
+        if fresh and isinstance(body, dict):
+            return body
+
+    try:
+        body = credit_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] credit snapshot failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "error": "Credit balance is unavailable."}
+
+    try:
+        RATES[CREDIT_CACHE_KEY] = {"at": now, "body": body}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] credit cache write failed: {type(exc).__name__}: {exc}")
+    return body
+
+
+def _invalidate_credit_cache() -> None:
+    """Drop the snapshot after a render so the next read reflects the spend."""
+    try:
+        RATES.pop(CREDIT_CACHE_KEY, None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] credit cache clear failed: {type(exc).__name__}: {exc}")
 
 
 def _rate_limit(ip: str) -> tuple[bool, int]:
@@ -837,7 +886,9 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         mode = "edit" if decoded else "generate"
     except Exception as exc:
         # Surface model failures as JSON rather than an opaque 500, so the web app
-        # can show the user what actually went wrong.
+        # can show the user what actually went wrong. The attempt may still have
+        # billed, so the cached balance is no longer trustworthy.
+        _invalidate_credit_cache()
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     body = {
@@ -856,6 +907,8 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     # Written before returning, so a client whose connection died mid-flight can
     # collect this render on resume rather than triggering a second one.
     _store_result(job_id, body)
+    # The spend just moved; make the next chip read or credit gate see it.
+    _invalidate_credit_cache()
     return body
 
 
@@ -891,12 +944,11 @@ def result(job_id: str = "") -> dict[str, Any]:
 @app.function(image=api_image, timeout=60)
 @modal.fastapi_endpoint(method="GET", requires_proxy_auth=True)
 def usage() -> dict[str, Any]:
-    """This month's remaining credit. CPU only — it never starts a GPU."""
-    try:
-        return credit_snapshot()
-    except Exception as exc:
-        print(f"[image-editor] credit snapshot failed: {type(exc).__name__}: {exc}")
-        return {"ok": False, "error": "Credit balance is unavailable."}
+    """This month's remaining credit, cached for a few minutes.
+
+    CPU only — it never starts a GPU.
+    """
+    return _cached_credit()
 
 
 # --------------------------------------------------------------------------- #
