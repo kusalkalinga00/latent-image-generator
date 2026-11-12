@@ -95,6 +95,11 @@ RATE_LIMIT_NAME = "image-editor-rate"
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW_S = 60 * 60
 
+# A global ceiling, separate from the per-address one: a link that escapes is many
+# addresses. This is a safety net, not the budget itself - the credit gate is the
+# real limit. Counted in UTC so the reset is predictable.
+DAILY_RENDER_MAX = 50
+
 # The 4-step distilled LoRA: 64 MiB, published for 2.1 specifically. It declares no
 # licence of its own and inherits the base model's research licence - see the
 # Licence section of the README before assuming anything about reuse.
@@ -713,6 +718,34 @@ def _rate_limit(ip: str) -> tuple[bool, int]:
     return True, 0
 
 
+def _daily_limit() -> tuple[bool, int]:
+    """DAILY_RENDER_MAX renders a UTC day across every address.
+
+    The per-address limit stops a loop on one connection; this one stops a shared
+    link that reached many of them. Best-effort like the rest of the store: if the
+    Dict cannot be read, the render is allowed and the failure is logged.
+    """
+    now = time.time()
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    key = f"global:{day}"
+    try:
+        count = int(RATES.get(key) or 0)
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        print(f"[image-editor] daily limit read failed: {type(exc).__name__}: {exc}")
+        return True, 0
+
+    if count >= DAILY_RENDER_MAX:
+        # Seconds until the UTC day rolls over.
+        retry_after = int(86400 - (now % 86400)) + 1
+        return False, max(1, retry_after)
+
+    try:
+        RATES[key] = count + 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] daily limit write failed: {type(exc).__name__}: {exc}")
+    return True, 0
+
+
 def _decode_images(raw: list[str]) -> tuple[list[bytes], str | None]:
     """Decode and validate reference images before a GPU is rented.
 
@@ -862,6 +895,21 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     job_id = str(payload.get("job_id") or "")
     if job_id and not JOB_ID_RE.fullmatch(job_id):
         return {"ok": False, "error": "job_id is not valid"}
+
+    # The per-address limit stops one connection; this global ceiling stops a
+    # shared link that reached many of them.
+    allowed, retry_after = _daily_limit()
+    if not allowed:
+        hours = max(1, (retry_after + 3599) // 3600)
+        return {
+            "ok": False,
+            "limited": True,
+            "retry_after": retry_after,
+            "error": (
+                f"The studio has reached its {DAILY_RENDER_MAX}-render daily limit. "
+                f"Try again in about {hours} hour{'s' if hours != 1 else ''}."
+            ),
+        }
 
     # Counted before the render, after the validation above: a rejected request
     # must not spend someone's quota, and a render must not start without one.
