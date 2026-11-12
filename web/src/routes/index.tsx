@@ -42,6 +42,11 @@ const WAIT_PHASES = {
   generate: ['Starting a GPU', 'Loading the model', 'Painting'],
 } as const
 
+// Modal keeps the container for 60s after the last render. Past that the next
+// call pays the weight load again, so the progress estimate has to fall back to
+// the cold curve instead of staying "warm" for the rest of the session.
+const WARM_WINDOW_MS = 90_000
+
 type Mode = 'edit' | 'generate'
 
 const DOT_COLS = 26
@@ -597,6 +602,7 @@ function App() {
   const statusRef = useRef(status)
   const runId = useRef(0)
   const warmed = useRef(false)
+  const lastResultAt = useRef(0)
   statusRef.current = status
 
   // The first run of a session loads 53.76 GiB into VRAM, which takes about 30s
@@ -799,6 +805,7 @@ function App() {
   const showResult = useCallback((out: EditOutput, mode: Mode) => {
     if (!out.imageBase64) return
     warmed.current = true
+    lastResultAt.current = Date.now()
     setResultUrl(`data:image/png;base64,${out.imageBase64}`)
     setResultMeta(`${out.seconds}s · ${out.steps} steps`)
     setResultModel(out.model ?? '')
@@ -904,6 +911,9 @@ function App() {
     const id = ++runId.current
     const instruction = prompt.trim()
     const mode = attachments.length > 0 ? 'edit' : 'generate'
+    // Only a run inside the scaledown window reuses a warm container; after it,
+    // the next call pays the cold load and the estimate must say so.
+    warmed.current = Date.now() - lastResultAt.current < WARM_WINDOW_MS
     const jobId = crypto.randomUUID()
     rememberJob({ id: jobId, prompt: instruction, mode, at: Date.now() })
     setElapsed(0)
