@@ -19,6 +19,15 @@ import type { CreditView } from '#/lib/credit'
 const CACHE_KEY = 'image-editor:credit'
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
+/**
+ * Matches MIN_CREDIT_USD in modal_app/src/modal_app/app.py.
+ *
+ * The chip stays public: this is the free tier, and the budget is part of the
+ * product. Below this the server refuses new renders, so the composer says so
+ * before the user waits for a round trip.
+ */
+export const MIN_CREDIT_USD = 1
+
 function readCache(): CreditView | null {
   if (typeof window === 'undefined') return null
   try {
