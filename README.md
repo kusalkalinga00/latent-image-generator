@@ -368,18 +368,23 @@ image-editor/
 │   │   │   ├── edit.ts           the ONLY place that talks to Modal (server)
 │   │   │   ├── credit.ts         credit server function (server)
 │   │   │   ├── credit-store.ts   tiny external store + localStorage cache
+│   │   │   ├── wait.ts           the progress estimate, unit-tested
+│   │   │   ├── transparency.ts   the prompt matcher, unit-tested
 │   │   │   └── toast.ts          external store for toasts
 │   │   └── styles.css            design tokens (light + dark) and all component CSS
 │   ├── vercel.json               framework: tanstack-start
 │   └── .env.example              3 required variables, no VITE_ prefix
 │
 ├── modal_app/
-│   └── src/modal_app/
-│       └── app.py                the GPU service: one class, three endpoints, helpers
+│   ├── src/modal_app/
+│   │   └── app.py                the GPU service: one class, three endpoints, helpers
+│   └── tests/test_app.py         pytest coverage for the pure helpers
 │
-├── scripts/edit.py               CLI client for the deployed endpoint
+├── scripts/
+│   ├── edit.py                   CLI client for the deployed endpoint
+│   └── verify.sh                 everything CI checks, locally
 ├── docs/COST.md                  the longer cost argument
-└── pyproject.toml                uv workspace root
+└── pyproject.toml                uv workspace root, ruff/mypy/pytest config
 ```
 
 ---
@@ -437,9 +442,9 @@ recover instead of forget.
 
 ### The wait is an estimate, not a feed
 
-Modal does not stream progress, so `waitProgress(elapsed, warmed)` maps elapsed seconds onto a
-percentage: three phases (`Starting a GPU`, `Loading the model`, then `Editing` or `Painting`),
-capped at **92%**. The cap is deliberate — a bar that reaches 100% while the image has not
+Modal does not stream progress, so `waitProgress(elapsed, warmed)` in `lib/wait.ts` maps elapsed
+seconds onto a percentage: three phases (`Starting a GPU`, `Loading the model`, then `Editing` or
+`Painting`), capped at **92%**. The cap is deliberate — a bar that reaches 100% while the image has not
 arrived is a lie, and the arrival of the image is the only real completion signal.
 
 The dot field is 15 rows of as many columns as fit — 26 at desktop width, 24 on a 375px phone —
@@ -629,6 +634,9 @@ storage-bound.
 - [`uv`](https://docs.astral.sh/uv/) (Python 3.12+), Node 22+, `pnpm`
 - a Modal account (Starter includes $30/month of compute)
 - a Vercel account for the web half
+
+Everything CI checks — web typecheck/lint/tests/build, ruff, mypy, pytest — is in
+`./scripts/verify.sh`.
 
 ### 1. Install, then authenticate
 
