@@ -33,10 +33,8 @@ const MAX_TOTAL_ATTACHMENT_CHARS = 3_400_000
 const MIN_ATTACHMENT_CHARS = 64_000
 
 // The backend holds one model - Qwen-Image-2.1 with the 4-step Lightning LoRA - and
-// it does both generation and editing. There is no second "standard" path to switch
-// to, so steps are not a choice the UI can offer; passing 4 is the honest thing to
-// send.
-const STEPS = 4
+// it does both generation and editing. The four-step schedule is fixed server-side,
+// so there is no steps control and no steps field in the request.
 
 const WAIT_PHASES = {
   edit: ['Starting a GPU', 'Loading the model', 'Editing'],
@@ -933,7 +931,6 @@ function App() {
               data: {
                 imagesBase64: attachments.map((a) => a.base64),
                 prompt: instruction,
-                steps: STEPS,
                 seed,
                 transparent,
                 jobId,
@@ -942,7 +939,6 @@ function App() {
           : await generateImage({
               data: {
                 prompt: instruction,
-                steps: STEPS,
                 seed,
                 aspect,
                 transparent,

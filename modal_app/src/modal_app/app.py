@@ -136,11 +136,9 @@ MAX_IMAGE_PIXELS = 40_000_000
 JOB_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
 
 # The distillation is four steps; that is the whole point of the LoRA, and the UI
-# offers no slider. ``steps`` stays in the request and is echoed back, but the
-# render always runs the distilled schedule - a "40 steps" request would silently
-# get 4 rather than pay for 40.
+# offers no slider. The request has no steps field, so a "40 steps" request cannot
+# be mistaken for work the model will actually do. The response echoes the 4 it ran.
 LIGHTNING_STEPS = 4
-DEFAULT_STEPS = LIGHTNING_STEPS
 # The distillation's own schedule: four sigmas, no terminal stretch.
 LIGHTNING_SIGMAS = [1.0, 0.75, 0.5, 0.25]
 
@@ -474,7 +472,6 @@ class Image21:
         prompt: str,
         aspect: str = DEFAULT_ASPECT,
         images: list[bytes] | None = None,
-        steps: int = LIGHTNING_STEPS,
         seed: int = 0,
         transparent: bool = False,
     ) -> dict[str, Any]:
@@ -538,7 +535,6 @@ def _render(
     prompt: str,
     aspect: str,
     images: list[bytes],
-    steps: int,
     seed: int,
     transparent: bool,
 ) -> dict[str, Any]:
@@ -547,7 +543,6 @@ def _render(
         prompt=prompt,
         aspect=aspect,
         images=images or None,
-        steps=int(steps),
         seed=int(seed),
         transparent=bool(transparent),
     )
@@ -756,7 +751,7 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
 
         POST <url>
         Authorization: Bearer ***
-        {"image_b64": ["..."], "prompt": "...", "steps": 4, "seed": 0}
+        {"image_b64": ["..."], "prompt": "...", "seed": 0}
 
     One endpoint, two jobs, decided by whether a photo came with the prompt: no
     image means generate, an image means edit. That keeps the web app from having
@@ -830,11 +825,10 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    steps = payload.get("steps", DEFAULT_STEPS)
     transparent = bool(payload.get("transparent"))
 
     try:
-        out = _render(prompt, aspect, decoded, steps, seed, transparent)
+        out = _render(prompt, aspect, decoded, seed, transparent)
         mode = "edit" if decoded else "generate"
     except Exception as exc:
         # Surface model failures as JSON rather than an opaque 500, so the web app
@@ -919,7 +913,7 @@ def smoke_generate(
     import pathlib
 
     started = time.time()
-    out = _render(prompt, aspect, [], DEFAULT_STEPS, 0, transparent)
+    out = _render(prompt, aspect, [], 0, transparent)
 
     out_dir = pathlib.Path("outputs")
     out_dir.mkdir(exist_ok=True)
@@ -960,7 +954,7 @@ def selftest(image: str = "web/public/sample.png") -> None:
         ("edit", "turn the background into a sunset beach", DEFAULT_ASPECT, [source], False),
     ]
     for name, prompt, aspect, images, transparent in runs:
-        out = _render(prompt, aspect, images, DEFAULT_STEPS, 1, transparent)
+        out = _render(prompt, aspect, images, 1, transparent)
         target = out_dir / f"selftest-{name}.png"
         target.write_bytes(out["png"])
         print(
@@ -998,7 +992,7 @@ def smoke(
         raise SystemExit(f"not a file: {image_path}")
 
     out = _render(
-        prompt, DEFAULT_ASPECT, [image_path.read_bytes()], DEFAULT_STEPS, 0, transparent
+        prompt, DEFAULT_ASPECT, [image_path.read_bytes()], 0, transparent
     )
 
     out_dir = pathlib.Path("outputs")
@@ -1018,7 +1012,6 @@ def batch_prompts(
     out_dir: str = "outputs/batch",
     aspect: str = DEFAULT_ASPECT,
     transparent: bool = True,
-    steps: int = DEFAULT_STEPS,
     seed: int = 7,
 ) -> None:
     """Render every prompt in a JSON list in ONE container.
@@ -1042,7 +1035,6 @@ def batch_prompts(
             item["prompt"],
             item.get("aspect", aspect),
             [],
-            int(item.get("steps", steps)),
             int(item.get("seed", seed)),
             bool(item.get("transparent", transparent)),
         )
