@@ -17,8 +17,9 @@ One composer, one rule: **a photo means edit, no photo means generate.**
   new image, in a shape you pick, with a real transparent background if you ask for one.
 
 Both run on demand on an H100 at [Modal](https://modal.com), behind a React app deployed to
-Vercel. Nothing is stored anywhere. The whole thing is designed to survive on the $30/month
-Modal Starter credit, which is the constraint that shaped most of the decisions below.
+Vercel. A finished render is kept for up to 45 minutes so a lost reply can be collected, then
+deleted. The whole thing is designed to survive on the $30/month Modal Starter credit, which is
+the constraint that shaped most of the decisions below.
 
 ---
 
@@ -93,7 +94,7 @@ would be 13.6MB on the wire. Without that, editing a generated result fails with
 like a model error — see [troubleshooting](#troubleshooting).
 
 The instruction is echoed as a chat bubble above the result, because the thing on screen is the
-answer to the sentence you typed — and after a cold start of 40-plus seconds, being able to see
+answer to the sentence you typed — and after a cold start of 20-plus seconds, being able to see
 what you asked for is what tells you the wait was worth it.
 
 Transparency is decided by the **prompt** first. A prompt that asks for a transparent
@@ -137,7 +138,7 @@ flowchart TB
     subgraph ONE["Image21 · one class"]
       M21["Qwen-Image-2.1<br/>+ 4-step Lightning LoRA<br/>H100 80 GB · 44 GB peak"]
     end
-    ALPHA["alpha clamp · CPU<br/>1-7/255 → 0"]
+    ALPHA["alpha clamp · GPU<br/>1-7/255 → 0"]
   end
 
   VOL[("Volume<br/>qwen21-weights<br/>33.1 GiB")]
@@ -218,10 +219,10 @@ sequenceDiagram
     A->>G: cold start, 33.1 GiB to load, ~19 s
   end
   A->>G: 4 denoise steps
-  G-->>A: an (R)GBA PNG
   opt transparency was asked for
-    A->>A: clamp alpha under 8/255 to 0, on CPU
+    G->>G: clamp alpha under 8/255 to 0
   end
+  G-->>A: an (R)GBA PNG
   A->>R: store the payload under the job id
   alt the reply gets through
     A-->>F: ok, mode, model, image_b64, transparent
@@ -257,16 +258,16 @@ a reply is lost, the client asks for that job by id until it turns up or the bud
    and proxy token from `process.env` *inside* the handler, and makes the outbound request with a
    `Bearer` header. This is the whole point of the indirection: a credential in the browser bundle
    is a credential given away.
-4. **Modal picks the job from the payload.** `image_b64` present routes to `Editor`, absent routes
-   to `Painter`. One endpoint, so the client never contains routing logic that could disagree with
-   the service.
-5. **A cold container loads its weights first.** 54 GiB off the Volume takes 30–70 s; a warm one
-   skips straight to the render. This is the only genuinely slow step, and it is why the UI shows
-   elapsed time instead of pretending to measure progress.
+4. **Modal picks the job from the payload.** `image_b64` present means edit, absent means generate;
+   both call `Image21.render`. One endpoint, so the client never contains routing logic that could
+   disagree with the service.
+5. **A cold container loads its weights first.** 33.1 GiB off the Volume takes about 19 s; a warm
+   one skips straight to the render. This is the only genuinely slow step, and it is why the UI
+   shows elapsed time instead of pretending to measure progress.
 6. **Four denoise steps, then a PNG.** At CFG 1.0 with the Lightning LoRA, four steps is the
    recipe the scheduler was distilled for. Typical denoise time is 3–4 s.
-7. **The background is cut out if it was asked for,** on the CPU container, then the JSON comes
-   back with `mode`, `model`, `transparent`, `seconds` and the image as base64.
+7. **The alpha is cleaned up if transparency was asked for,** inside the GPU class, then the JSON
+   comes back with `mode`, `model`, `transparent`, `seconds` and the image as base64.
 8. **The page renders the answer** — image, the model that made it, the time, and whether it
    carries alpha — and the GPU container sits idle for 60 s before scaling to zero.
 
@@ -625,7 +626,7 @@ because it assumes the GPU is already warm. The honest planning numbers are the 
 | A shared public link | Three guards cap it: 10/hour per address, 50/day globally, and no new renders below $1 of credit |
 
 GPU memory snapshots are **not** used: Modal's docs state they "do not speed up model loading
-from storage" and may worsen it, and for a 53.76 GiB checkpoint initialisation is entirely
+from storage" and may worsen it, and for a 33.1 GiB checkpoint initialisation is entirely
 storage-bound.
 
 ---
@@ -711,10 +712,11 @@ Outputs land in `outputs/`. Each run costs a cold start (~$0.09).
 uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
 ```
 
-It prints both endpoint URLs:
+It prints the endpoint URLs:
 
 ```text
 https://<workspace>--image-editor-api.modal.run     POST  (proxy auth)
+https://<workspace>--image-editor-result.modal.run  GET   (proxy auth)
 https://<workspace>--image-editor-usage.modal.run   GET   (proxy auth)
 ```
 

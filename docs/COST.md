@@ -3,7 +3,7 @@
 Modal bills per second of a **live container**. Two things follow that people
 usually get wrong:
 
-1. **Loading the model is billed.** A cold start is not free waiting; it is 30–70
+1. **Loading the model is billed.** A cold start is not free waiting; it is 19.3
    seconds of H100 at full rate.
 2. **The idle window after the last request is billed too.** Modal's pricing FAQ:
    containers stay alive "for 60 seconds after the last inputs before we shut them
