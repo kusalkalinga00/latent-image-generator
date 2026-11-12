@@ -91,6 +91,10 @@ RESULTS_TTL_S = 45 * 60
 # address is forwarded in the payload, and the count lives in a Modal Dict because
 # the API function is not pinned to one container: an in-process counter would
 # reset on every cold start and would never see another instance's traffic.
+#
+# The same Dict also carries the global daily counter ("global:...") and the credit
+# snapshot ("credit:..."), so per-address keys are prefixed "ip:" to keep the
+# namespaces from colliding.
 RATE_LIMIT_NAME = "image-editor-rate"
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW_S = 60 * 60
@@ -716,7 +720,7 @@ def _rate_limit(ip: str) -> tuple[bool, int]:
     down an app whose only job is to make pictures. The worst case is the old
     behaviour: no limit.
     """
-    key = (ip or "unknown").strip()[:64]
+    key = f"ip:{(ip or 'unknown').strip()[:64]}"
     now = time.time()
 
     try:
