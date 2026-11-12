@@ -23,9 +23,13 @@ const MAX_IMAGES = 4
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 const MAX_EDGE = 1536 // the model works around 1.5MP; larger just costs GPU seconds
 // Vercel rejects a serverless request body over 4.5MB with a 413 before the code
-// runs. Base64 inflates an image by 4/3, so the encoded string has to stay under
-// this, with room for the JSON around it.
-const MAX_ATTACHMENT_CHARS = 3_400_000
+// runs. Base64 inflates an image by 4/3, so the *total* encoded size across every
+// attachment has to stay under this, with room for the JSON around it. A per-image
+// cap is not enough: four images at the old cap were 13.6MB of base64.
+const MAX_TOTAL_ATTACHMENT_CHARS = 3_400_000
+// Below this an image is too small to be worth sending; shrinking further is a
+// worse answer than asking the user to remove one.
+const MIN_ATTACHMENT_CHARS = 64_000
 
 // The backend holds one model - Qwen-Image-2.1 with the 4-step Lightning LoRA - and
 // it does both generation and editing. There is no second "standard" path to switch
@@ -355,11 +359,17 @@ function encodeCanvas(canvas: HTMLCanvasElement): string {
  * a 413 before the server function ever ran — which the app could only report as
  * "the edit did not finish". So the encoded size is enforced here, not assumed.
  */
-async function prepareImage(file: File): Promise<Attachment> {
+async function prepareImage(
+  file: File,
+  budgetChars = MAX_TOTAL_ATTACHMENT_CHARS,
+): Promise<Attachment> {
   if (file.size > MAX_UPLOAD_BYTES) {
     throw new Error(
       `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB, over the 20MB limit`,
     )
+  }
+  if (budgetChars < MIN_ATTACHMENT_CHARS) {
+    throw new Error('There is no room for another image. Remove one first.')
   }
 
   let bitmap: ImageBitmap
@@ -387,11 +397,11 @@ async function prepareImage(file: File): Promise<Attachment> {
     ctx.drawImage(bitmap, 0, 0, width, height)
     dataUrl = encodeCanvas(canvas)
     const chars = dataUrl.length - dataUrl.indexOf(',') - 1
-    if (chars <= MAX_ATTACHMENT_CHARS) break
+    if (chars <= budgetChars) break
     if (attempt >= 5) {
       bitmap.close()
       throw new Error(
-        `${file.name} is too detailed to send. Try a smaller image.`,
+        `${file.name} is too detailed to send with the images already attached. Remove one or try a smaller image.`,
       )
     }
     width = Math.max(1, Math.round(width * 0.8))
@@ -674,10 +684,27 @@ function App() {
         return
       }
 
+      // The budget is shared by every attachment, not per image: the request body
+      // carries all of them, and Vercel caps the body, not each part.
+      const existingChars = attachments.reduce(
+        (sum, item) => sum + item.base64.length,
+        0,
+      )
+      let remaining = MAX_TOTAL_ATTACHMENT_CHARS - existingChars
+
       const prepared: Attachment[] = []
       for (const file of incoming.slice(0, room)) {
+        if (remaining < MIN_ATTACHMENT_CHARS) {
+          pushToast(
+            'error',
+            'Those images are too large together. Remove one or add a smaller image.',
+          )
+          break
+        }
         try {
-          prepared.push(await prepareImage(file))
+          const next = await prepareImage(file, remaining)
+          prepared.push(next)
+          remaining -= next.base64.length
         } catch (err) {
           const message =
             err instanceof Error ? err.message : 'Could not read that image.'
@@ -701,7 +728,7 @@ function App() {
         )
       }
     },
-    [attachments.length],
+    [attachments],
   )
 
   useEffect(() => {

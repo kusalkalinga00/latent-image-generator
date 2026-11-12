@@ -77,6 +77,15 @@ export interface EditOutput {
   error?: string
 }
 
+/**
+ * The total encoded size of every attachment in one request.
+ *
+ * Vercel rejects a body over 4.5MB before this code runs, and base64 adds a third,
+ * so this has to be a budget for the whole request - not a cap per image. Four
+ * images at 3.4M each was 13.6MB and could never have survived the trip.
+ */
+const MAX_TOTAL_ATTACHMENT_CHARS = 3_400_000
+
 /** The buckets the model was trained at; off-bucket sizes cost quality. */
 export const ASPECTS = [
   '1:1',
@@ -256,6 +265,15 @@ export const editImage = createServerFn({ method: 'POST' })
     ) {
       return failed(
         'One of the images could not be read. Try a different file.',
+      )
+    }
+    const totalChars = data.imagesBase64.reduce(
+      (sum, image) => sum + image.length,
+      0,
+    )
+    if (totalChars > MAX_TOTAL_ATTACHMENT_CHARS) {
+      return failed(
+        'Those images are too large together. Try fewer or smaller images.',
       )
     }
     if (typeof data.prompt !== 'string' || !data.prompt.trim()) {
