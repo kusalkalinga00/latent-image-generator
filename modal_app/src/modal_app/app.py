@@ -132,8 +132,10 @@ MAX_IMAGES = 4
 MAX_PROMPT_CHARS = 2000
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024
-MAX_IMAGE_PIXELS = 40_000_000
-JOB_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+# 2048² is the largest size this deployment was measured at (60.7 GB peak VRAM);
+# anything beyond it is a GPU OOM waiting to happen, not a render.
+MAX_IMAGE_PIXELS = 4_200_000
+JOB_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
 
 # The distillation is four steps; that is the whole point of the LoRA, and the UI
 # offers no slider. The request has no steps field, so a "40 steps" request cannot
@@ -697,7 +699,10 @@ def _decode_images(raw: list[str]) -> tuple[list[bytes], str | None]:
         try:
             with Image.open(io.BytesIO(data)) as image:
                 if image.width * image.height > MAX_IMAGE_PIXELS:
-                    return [], f"image {index} has too many pixels"
+                    return [], (
+                        f"image {index} is larger than "
+                        f"{MAX_IMAGE_PIXELS // 1_000_000}MP; downscale it first"
+                    )
                 image.load()
         except Exception as exc:  # noqa: BLE001
             return [], f"image {index} could not be read: {type(exc).__name__}"
