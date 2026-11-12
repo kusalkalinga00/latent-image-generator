@@ -126,6 +126,15 @@ DEFAULT_ASPECT = "1:1"
 # model will not use.
 MAX_IMAGES = 4
 
+# Validation happens before the GPU class is called, so a corrupt payload cannot
+# bill a cold start just to fail inside Image.open. The web app keeps requests far
+# below these; they are the outer bounds for a direct API client.
+MAX_PROMPT_CHARS = 2000
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_IMAGE_PIXELS = 40_000_000
+JOB_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+
 # The distillation is four steps; that is the whole point of the LoRA, and the UI
 # offers no slider. ``steps`` stays in the request and is echoed back, but the
 # render always runs the distilled schedule - a "40 steps" request would silently
@@ -464,14 +473,12 @@ class Image21:
         self,
         prompt: str,
         aspect: str = DEFAULT_ASPECT,
-        images: list[str] | None = None,
+        images: list[bytes] | None = None,
         steps: int = LIGHTNING_STEPS,
         seed: int = 0,
         transparent: bool = False,
     ) -> dict[str, Any]:
         """Edit if images arrive, generate if not. One model, one code path."""
-        import base64
-
         import torch
         from PIL import Image
 
@@ -485,8 +492,7 @@ class Image21:
         kwargs: dict[str, Any] = {}
         if images:
             decoded = [
-                Image.open(io.BytesIO(base64.b64decode(item))).convert("RGB")
-                for item in images
+                Image.open(io.BytesIO(item)).convert("RGB") for item in images
             ]
             # An edit inherits the source's size: the UI never offers a shape
             # picker for edits, and resizing a photo would be an unasked-for edit.
@@ -537,12 +543,10 @@ def _render(
     transparent: bool,
 ) -> dict[str, Any]:
     """The one place that calls the GPU, shared by the API and the smoke tests."""
-    import base64
-
     return Image21().render.remote(
         prompt=prompt,
         aspect=aspect,
-        images=[base64.b64encode(item).decode("ascii") for item in images] or None,
+        images=images or None,
         steps=int(steps),
         seed=int(seed),
         transparent=bool(transparent),
@@ -663,6 +667,49 @@ def _rate_limit(ip: str) -> tuple[bool, int]:
     return True, 0
 
 
+def _decode_images(raw: list[str]) -> tuple[list[bytes], str | None]:
+    """Decode and validate reference images before a GPU is rented.
+
+    The GPU class used to be the first thing to open these bytes, so a truncated or
+    non-image payload failed only after a cold start had been billed. This runs on
+    the API's CPU container and hands the GPU images that are known to load.
+    """
+    if not raw:
+        return [], None
+
+    import base64
+
+    from PIL import Image
+
+    decoded: list[bytes] = []
+    total = 0
+    for index, item in enumerate(raw, start=1):
+        try:
+            data = base64.b64decode(item, validate=True)
+        except Exception as exc:  # noqa: BLE001 - reported as a request error
+            return [], f"image {index} is not valid base64: {type(exc).__name__}"
+        if len(data) > MAX_IMAGE_BYTES:
+            return [], (
+                f"image {index} is larger than "
+                f"{MAX_IMAGE_BYTES // (1024 * 1024)}MB"
+            )
+        total += len(data)
+        if total > MAX_TOTAL_IMAGE_BYTES:
+            return [], (
+                "the images together are larger than "
+                f"{MAX_TOTAL_IMAGE_BYTES // (1024 * 1024)}MB"
+            )
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    return [], f"image {index} has too many pixels"
+                image.load()
+        except Exception as exc:  # noqa: BLE001
+            return [], f"image {index} could not be read: {type(exc).__name__}"
+        decoded.append(data)
+    return decoded, None
+
+
 def _jobs_path(job_id: str) -> str:
     # The id arrives from a client, so it is never trusted as a path segment.
     return os.path.join(RESULTS_PATH, re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:64] + ".json")
@@ -732,6 +779,11 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     prompt = (payload.get("prompt") or "").strip()
     if not prompt:
         return {"ok": False, "error": "prompt is required"}
+    if len(prompt) > MAX_PROMPT_CHARS:
+        return {
+            "ok": False,
+            "error": f"prompt must be under {MAX_PROMPT_CHARS} characters",
+        }
 
     raw = payload.get("image_b64") or []
     if isinstance(raw, str):
@@ -740,9 +792,31 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     if len(raw) > MAX_IMAGES:
         return {"ok": False, "error": f"at most {MAX_IMAGES} images"}
 
-    # Counted before the render, after the cheap validation above: a rejected
-    # request must not spend someone's quota, and a render must not start without
-    # one. The limit is per address, per hour; the message says when it frees up.
+    # Decode and validate on this CPU container, before any GPU is rented: a bad
+    # image should cost milliseconds here, not a cold start there.
+    decoded, image_error = _decode_images(raw)
+    if image_error:
+        return {"ok": False, "error": image_error}
+
+    if raw:
+        aspect = DEFAULT_ASPECT
+    else:
+        aspect = str(payload.get("aspect") or DEFAULT_ASPECT)
+        if aspect not in ASPECTS:
+            return {"ok": False, "error": f"unknown aspect: {aspect}"}
+
+    try:
+        seed = int(payload.get("seed", 0))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "seed must be an integer"}
+
+    job_id = str(payload.get("job_id") or "")
+    if job_id and not JOB_ID_RE.fullmatch(job_id):
+        return {"ok": False, "error": "job_id is not valid"}
+
+    # Counted before the render, after the validation above: a rejected request
+    # must not spend someone's quota, and a render must not start without one.
+    # The limit is per address, per hour; the message says when it frees up.
     allowed, retry_after = _rate_limit(str(payload.get("client_ip") or "unknown"))
     if not allowed:
         minutes = max(1, (retry_after + 59) // 60)
@@ -757,21 +831,11 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     steps = payload.get("steps", DEFAULT_STEPS)
-    seed = payload.get("seed", 0)
     transparent = bool(payload.get("transparent"))
 
     try:
-        if raw:
-            try:
-                decoded = [base64.b64decode(item) for item in raw]
-            except Exception as exc:
-                return {"ok": False, "error": f"image_b64 is not valid base64: {exc}"}
-            out = _render(prompt, DEFAULT_ASPECT, decoded, steps, seed, transparent)
-            mode = "edit"
-        else:
-            aspect = str(payload.get("aspect") or DEFAULT_ASPECT)
-            out = _render(prompt, aspect, [], steps, seed, transparent)
-            mode = "generate"
+        out = _render(prompt, aspect, decoded, steps, seed, transparent)
+        mode = "edit" if decoded else "generate"
     except Exception as exc:
         # Surface model failures as JSON rather than an opaque 500, so the web app
         # can show the user what actually went wrong.
@@ -792,7 +856,7 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Written before returning, so a client whose connection died mid-flight can
     # collect this render on resume rather than triggering a second one.
-    _store_result(str(payload.get("job_id") or ""), body)
+    _store_result(job_id, body)
     return body
 
 
