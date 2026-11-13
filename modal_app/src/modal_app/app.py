@@ -84,6 +84,11 @@ RESULTS_VOLUME_NAME = "image-editor-results"
 RESULTS_PATH = "/results"
 RESULTS_TTL_S = 45 * 60
 
+# A job that has started but has not stored a result yet. Long enough to cover a
+# cold start plus a queue behind max_containers=1; short enough that a crashed
+# request cannot block its id forever.
+INFLIGHT_TTL_S = 10 * 60
+
 # Per-address rate limit, enforced here rather than in the web app.
 #
 # The web app knows the visitor's address; Modal does not - Vercel calls this
@@ -529,21 +534,28 @@ class Image21:
 
         buffer = io.BytesIO()
         result.images[0].save(buffer, format="PNG")
-        png = buffer.getvalue()
-        # Read the alpha before flattening: this says whether the model gave us an
-        # alpha channel, not whether the request asked for one.
-        had_alpha = _useful_alpha(png)
-        png = _snap_alpha(png) if transparent else _flatten(png)
 
+        # The PNG goes back raw. Alpha cleanup is CPU work, so it happens in
+        # _render on the API container instead of consuming H100 seconds here.
         return {
-            "png": png,
-            # False when the model returned no usable alpha, so the client never
-            # claims a transparency that is not there.
-            "transparent": bool(transparent and had_alpha),
+            "png": buffer.getvalue(),
             "seconds": round(elapsed, 2),
             "steps": LIGHTNING_STEPS,
             "size": list(result.images[0].size),
         }
+
+
+def _prepare_output(png: bytes, transparent: bool) -> tuple[bytes, bool]:
+    """Clean up the alpha on the CPU container, not the GPU.
+
+    The model returns RGBA whether or not transparency was asked for. Clamping the
+    1-7/255 haze and flattening onto white are pixel operations, and doing them in
+    the API container keeps them off the H100's bill.
+    """
+    had_alpha = _useful_alpha(png)
+    if transparent:
+        return _snap_alpha(png), bool(had_alpha)
+    return _flatten(png), False
 
 
 def _render(
@@ -554,13 +566,15 @@ def _render(
     transparent: bool,
 ) -> dict[str, Any]:
     """The one place that calls the GPU, shared by the API and the smoke tests."""
-    return Image21().render.remote(
+    out = Image21().render.remote(
         prompt=prompt,
         aspect=aspect,
         images=images or None,
         seed=int(seed),
         transparent=bool(transparent),
     )
+    png, transparent_out = _prepare_output(out["png"], bool(transparent))
+    return {**out, "png": png, "transparent": transparent_out}
 
 
 # --------------------------------------------------------------------------- #
@@ -857,6 +871,70 @@ def _prune_results() -> None:
             pass
 
 
+def _stored_result(job_id: str) -> dict[str, Any] | None:
+    """A fresh stored render, or None when there is nothing to replay."""
+    if not job_id:
+        return None
+    try:
+        RESULTS.reload()
+        path = _jobs_path(job_id)
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as handle:
+            body = json.load(handle)
+        if time.time() - float(body.pop("at", 0)) > RESULTS_TTL_S:
+            return None
+        return {**body, "ok": True}
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        print(f"[image-editor] result replay failed: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _in_flight(job_id: str) -> bool:
+    """Has this id already started a render that has not stored a result yet?"""
+    if not job_id:
+        return False
+    try:
+        stamp = RATES.get(f"inflight:{job_id}")
+        return bool(stamp) and time.time() - float(stamp) < INFLIGHT_TTL_S
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] inflight read failed: {type(exc).__name__}: {exc}")
+        return False
+
+
+def _mark_in_flight(job_id: str) -> None:
+    if not job_id:
+        return
+    try:
+        RATES[f"inflight:{job_id}"] = time.time()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] inflight write failed: {type(exc).__name__}: {exc}")
+
+
+def _in_flight_count() -> int:
+    """How many jobs are running or queued behind the single GPU."""
+    now = time.time()
+    try:
+        return sum(
+            1
+            for key in RATES.keys()
+            if str(key).startswith("inflight:")
+            and now - float(RATES.get(key) or 0) < INFLIGHT_TTL_S
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] inflight count failed: {type(exc).__name__}: {exc}")
+        return 0
+
+
+def _clear_in_flight(job_id: str) -> None:
+    if not job_id:
+        return
+    try:
+        RATES.pop(f"inflight:{job_id}", None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[image-editor] inflight clear failed: {type(exc).__name__}: {exc}")
+
+
 @app.function(
     image=api_image, volumes={"/models": weights, RESULTS_PATH: RESULTS}, timeout=1200
 )
@@ -876,10 +954,13 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     image means generate, an image means edit. That keeps the web app from having
     to know which endpoint to call, and keeps the mode in one place.
 
-    ``transparent: true`` now asks the model for an alpha channel it can actually
-    produce, then clamps the near-zero background to true zero. The field in the
-    response reports what happened rather than what was asked: if no usable alpha
-    comes back, it is false and the image is returned intact.
+    ``transparent: true`` asks the model for an alpha channel it can actually
+    produce; the API then clamps the near-zero background to true zero. The field
+    in the response reports what happened rather than what was asked: if no usable
+    alpha comes back, it is false and the image is returned intact.
+
+    A repeated ``job_id`` returns the stored render instead of starting a second;
+    while the first is in flight, the duplicate is told to wait for it.
 
     Renders are limited to ``RATE_LIMIT_MAX`` per hour per ``client_ip``, a value
     the web app forwards because Vercel's egress is the only address this endpoint
@@ -928,6 +1009,20 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
     if job_id and not JOB_ID_RE.fullmatch(job_id):
         return {"ok": False, "error": "job_id is not valid"}
 
+    # A retry with the same id must not render twice. If the result is already
+    # stored, hand it back; if the original is still running, let the client wait
+    # for that one instead of starting a second.
+    if job_id:
+        existing = _stored_result(job_id)
+        if existing is not None:
+            return existing
+        if _in_flight(job_id):
+            return {
+                "ok": False,
+                "pending": True,
+                "error": "That render is already running.",
+            }
+
     # The monthly grant is the real ceiling. Check it before either counter so an
     # exhausted budget does not spend a daily or hourly slot on a refused request.
     credit_ok, credit_error = _credit_gate()
@@ -971,36 +1066,40 @@ def api(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     transparent = bool(payload.get("transparent"))
+    _mark_in_flight(job_id)
 
     try:
-        out = _render(prompt, aspect, decoded, seed, transparent)
-        mode = "edit" if decoded else "generate"
-    except Exception as exc:
-        # Surface model failures as JSON rather than an opaque 500, so the web app
-        # can show the user what actually went wrong. The attempt may still have
-        # billed, so the cached balance is no longer trustworthy.
+        try:
+            out = _render(prompt, aspect, decoded, seed, transparent)
+            mode = "edit" if decoded else "generate"
+        except Exception as exc:
+            # Surface model failures as JSON rather than an opaque 500, so the web
+            # app can show the user what actually went wrong. The attempt may still
+            # have billed, so the cached balance is no longer trustworthy.
+            _invalidate_credit_cache()
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        body = {
+            "ok": True,
+            "mode": mode,
+            # One model now, so this is the same string either way - but the field
+            # stays: the client shows it, and it is how a result is attributed.
+            "model": MODEL_ID,
+            "transparent": out["transparent"],
+            "image_b64": base64.b64encode(out["png"]).decode("ascii"),
+            "seconds": out["seconds"],
+            "steps": out["steps"],
+            "size": out["size"],
+        }
+
+        # Written before returning, so a client whose connection died mid-flight
+        # can collect this render on resume rather than triggering a second one.
+        _store_result(job_id, body)
+        # The spend just moved; make the next chip read or credit gate see it.
         _invalidate_credit_cache()
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-
-    body = {
-        "ok": True,
-        "mode": mode,
-        # One model now, so this is the same string either way - but the field
-        # stays: the client shows it, and it is how a result is attributed.
-        "model": MODEL_ID,
-        "transparent": out["transparent"],
-        "image_b64": base64.b64encode(out["png"]).decode("ascii"),
-        "seconds": out["seconds"],
-        "steps": out["steps"],
-        "size": out["size"],
-    }
-
-    # Written before returning, so a client whose connection died mid-flight can
-    # collect this render on resume rather than triggering a second one.
-    _store_result(job_id, body)
-    # The spend just moved; make the next chip read or credit gate see it.
-    _invalidate_credit_cache()
-    return body
+        return body
+    finally:
+        _clear_in_flight(job_id)
 
 
 @app.function(image=api_image, volumes={RESULTS_PATH: RESULTS}, timeout=60)
@@ -1040,6 +1139,13 @@ def usage() -> dict[str, Any]:
     CPU only — it never starts a GPU.
     """
     return _cached_credit()
+
+
+@app.function(image=api_image, timeout=60)
+@modal.fastapi_endpoint(method="GET", requires_proxy_auth=True)
+def status() -> dict[str, Any]:
+    """How many renders are running or queued behind the single GPU."""
+    return {"ok": True, "busy": _in_flight_count()}
 
 
 # --------------------------------------------------------------------------- #

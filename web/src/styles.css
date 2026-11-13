@@ -614,6 +614,11 @@ button {
   letter-spacing: -0.01em;
 }
 
+.matrix-queue {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
 .matrix-field {
   position: relative;
   display: inline-block;
@@ -1213,6 +1218,14 @@ button {
 .disclaimer b {
   color: var(--ink-2);
   font-weight: 500;
+}
+
+.warm-hint {
+  margin: 0 0 6px;
+  color: var(--ok);
+  font-size: 11.5px;
+  text-align: center;
+  text-wrap: balance;
 }
 
 /* ------------------------------------------------------------------ *

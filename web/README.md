@@ -30,9 +30,10 @@ pnpm dev                  # http://localhost:3000
 | `src/components/Sketching.tsx` | the wait timer and dot field |
 | `src/components/Compare.tsx` | the before/after wipe |
 | `src/components/ComposerControls.tsx` | transparency toggle and shape listbox |
-| `src/lib/edit.ts` | the only module that talks to Modal (server-only) |
+| `src/lib/edit.ts` | render transport to Modal (server-only) |
 | `src/lib/credit.ts` | credit server function |
 | `src/lib/credit-store.ts` | credit cache + subscription |
+| `src/lib/status.ts` | queue-depth server function |
 | `src/lib/wait.ts` | progress estimate and phase, unit-tested |
 | `src/lib/transparency.ts` | prompt matcher for transparent output, unit-tested |
 | `src/styles.css` | design tokens (light/dark) and all component CSS |

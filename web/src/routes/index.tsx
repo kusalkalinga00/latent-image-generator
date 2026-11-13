@@ -23,6 +23,7 @@ import {
   generateImage,
 } from '#/lib/edit'
 import type { Aspect, EditOutput, Mode } from '#/lib/edit'
+import { getStatus } from '#/lib/status'
 import { pushToast } from '#/lib/toast'
 import { wantsTransparent } from '#/lib/transparency'
 
@@ -234,6 +235,8 @@ function App() {
   >(null)
   const [resultAlpha, setResultAlpha] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const [warmUntil, setWarmUntil] = useState(0)
+  const [ahead, setAhead] = useState(0)
 
   // The chip is public on purpose - this is the free tier, and the budget is part
   // of the product. The composer only pre-empts a render the server will refuse;
@@ -292,6 +295,45 @@ function App() {
       clearTimeout(settle)
     }
   }, [status, resultUrl])
+
+  // The GPU stays warm for the 60s scaledown window. Say so after a result, so a
+  // second edit in the same sitting reads as nearly free.
+  useEffect(() => {
+    if (!warmUntil) return
+    const remaining = warmUntil - Date.now()
+    if (remaining <= 0) {
+      setWarmUntil(0)
+      return
+    }
+    const id = setTimeout(() => setWarmUntil(0), remaining)
+    return () => clearTimeout(id)
+  }, [warmUntil])
+
+  // While a render is running, ask the API how many jobs are queued behind the
+  // single GPU. The count includes this request, so subtract one.
+  useEffect(() => {
+    if (status !== 'running') {
+      setAhead(0)
+      return
+    }
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const out = await getStatus()
+        if (!cancelled && out.ok && typeof out.busy === 'number') {
+          setAhead(Math.max(0, out.busy - 1))
+        }
+      } catch {
+        // Status is advisory; a failed poll leaves the last value.
+      }
+    }
+    void poll()
+    const id = setInterval(() => void poll(), 2000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [status])
 
   // A narrow pill cannot hold the long placeholder without wrapping it into the
   // textarea's own height, so phones get the short one. Declared before the
@@ -483,6 +525,7 @@ function App() {
       const blob = base64ToBlob(out.imageBase64)
       warmed.current = true
       lastResultAt.current = Date.now()
+      setWarmUntil(Date.now() + 60_000)
       setResultBlob(blob)
       replaceResultUrl(URL.createObjectURL(blob))
       setResultMeta(`${out.seconds}s · ${out.steps} steps`)
@@ -638,14 +681,14 @@ function App() {
       if (runId.current !== id) return
 
       if (!out.ok || !out.imageBase64) {
-        // A lost connection is not a lost render: try to collect it before
-        // telling the user anything went wrong.
-        if (out.network && (await collect(jobId, mode, id))) return
+        // A lost connection or an in-flight duplicate is not a failure: collect
+        // the same job instead of starting a second render.
+        if ((out.network || out.pending) && (await collect(jobId, mode, id)))
+          return
 
-        // Anything else is a definitive refusal - validation, rate limit, or a
-        // model failure - and nothing was stored under this id. Keeping it would
-        // make the next reload poll for a render that never existed.
-        if (!out.network) rememberJob(null)
+        // A definitive refusal stores nothing. Keep the id when the original
+        // request may still be running.
+        if (!out.network && !out.pending) rememberJob(null)
 
         const message =
           out.error ?? 'The edit did not finish. Try again in a moment.'
@@ -815,7 +858,11 @@ function App() {
             {lastPrompt && <p className="bubble">{lastPrompt}</p>}
 
             {running ? (
-              <Sketching warmed={warmed.current} mode={lastMode} />
+              <Sketching
+                warmed={warmed.current}
+                mode={lastMode}
+                ahead={ahead}
+              />
             ) : (
               <>
                 <figure
@@ -1184,6 +1231,12 @@ function App() {
             </button>
           )}
         </form>
+
+        {!running && !creditBlocked && warmUntil > 0 && (
+          <p className="warm-hint">
+            GPU warm for ~1 min — another render is nearly free.
+          </p>
+        )}
 
         <p className="disclaimer">
           Qwen-Image ·{narrow ? ' ' : ' on-demand GPU · '}
