@@ -1220,6 +1220,14 @@ button {
   font-weight: 500;
 }
 
+.warm-hint {
+  margin: 0 0 6px;
+  color: var(--ok);
+  font-size: 11.5px;
+  text-align: center;
+  text-wrap: balance;
+}
+
 /* ------------------------------------------------------------------ *
  * Notices
  * ------------------------------------------------------------------ */

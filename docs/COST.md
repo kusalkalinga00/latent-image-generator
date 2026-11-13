@@ -110,7 +110,8 @@ figure is checkable rather than remembered.
 The chip in the app shows the last row, because that answers "how many more can I
 do" — but it assumes a warm GPU. Plan with the batch rows. **The gap between 329 and
 3,540 is entirely the 60-second idle tail**, and it is the most useful thing to know
-about running this app.
+about running this app. After a result the dock says the GPU is warm for about a
+minute; a second render inside that window is the marginal row, not a new cold start.
 
 ## What a shared link would cost
 

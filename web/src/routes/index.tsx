@@ -1232,6 +1232,12 @@ function App() {
           )}
         </form>
 
+        {!running && !creditBlocked && warmUntil > 0 && (
+          <p className="warm-hint">
+            GPU warm for ~1 min — another render is nearly free.
+          </p>
+        )}
+
         <p className="disclaimer">
           Qwen-Image ·{narrow ? ' ' : ' on-demand GPU · '}
           <b>renders deleted after 45 min</b>
