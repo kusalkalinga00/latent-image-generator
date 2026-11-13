@@ -33,14 +33,14 @@ uv run --package modal-app modal run modal_app/src/modal_app/app.py::smoke_gener
 uv run --package modal-app modal deploy modal_app/src/modal_app/app.py
 ```
 
-All three endpoints require Modal proxy auth and scale to zero. See `docs/COST.md` for
+All four endpoints require Modal proxy auth and scale to zero. See `docs/COST.md` for
 the measured cost model — in particular, that the 60-second idle window is billed.
 
 ## Transparency
 
 2.1 renders RGBA natively when asked in the phrasing it was trained on, so
 `transparent: true` appends that phrasing, the model returns a real alpha channel,
-and the render only clamps the 1–7/255 background haze to 0. `transparent` in the
+and the API layer only clamps the 1–7/255 background haze to 0. `transparent` in the
 response says whether an alpha channel actually came back — not whether one was
 asked for.
 

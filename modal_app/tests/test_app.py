@@ -1,6 +1,9 @@
 import base64
 import io
+import json
+import time
 from decimal import Decimal
+from pathlib import Path
 
 from PIL import Image
 
@@ -126,3 +129,76 @@ def test_rate_limit_keys_cannot_collide_with_other_namespaces(monkeypatch):
     assert service._rate_limit("credit:snapshot")[0] is True
     assert isinstance(service.RATES["credit:snapshot"], dict)
     assert "ip:credit:snapshot" in service.RATES
+
+
+def test_prepare_output_cleans_alpha_on_the_cpu_side():
+    cutout = Image.new("RGBA", (2, 2), (10, 20, 30, 100))
+    opaque = Image.new("RGBA", (2, 2), (10, 20, 30, 255))
+
+    png, transparent = service._prepare_output(png_from(cutout), True)
+    assert transparent is True
+    assert Image.open(io.BytesIO(png)).mode == "RGBA"
+
+    png, transparent = service._prepare_output(png_from(opaque), True)
+    assert transparent is False
+
+    png, transparent = service._prepare_output(png_from(opaque), False)
+    assert transparent is False
+    assert Image.open(io.BytesIO(png)).mode == "RGB"
+
+
+def test_stored_result_replays_a_fresh_render(monkeypatch, tmp_path):
+    class FakeResults:
+        def reload(self):
+            pass
+
+    monkeypatch.setattr(service, "RESULTS", FakeResults())
+    monkeypatch.setattr(service, "RESULTS_PATH", str(tmp_path))
+
+    job_id = "job-12345678"
+    path = Path(service._jobs_path(job_id))
+    path.write_text(json.dumps({"ok": True, "image_b64": "x", "at": time.time()}))
+    assert service._stored_result(job_id)["image_b64"] == "x"
+
+    path.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "image_b64": "x",
+                "at": time.time() - service.RESULTS_TTL_S - 1,
+            }
+        )
+    )
+    assert service._stored_result(job_id) is None
+
+
+def test_in_flight_marker_blocks_a_duplicate_then_clears(monkeypatch):
+    monkeypatch.setattr(service, "RATES", {})
+    job_id = "job-12345678"
+
+    assert service._in_flight(job_id) is False
+    service._mark_in_flight(job_id)
+    assert service._in_flight(job_id) is True
+    service._clear_in_flight(job_id)
+    assert service._in_flight(job_id) is False
+
+
+def test_in_flight_marker_expires(monkeypatch):
+    monkeypatch.setattr(service, "RATES", {})
+    job_id = "job-12345678"
+    service.RATES[f"inflight:{job_id}"] = time.time() - service.INFLIGHT_TTL_S - 1
+
+    assert service._in_flight(job_id) is False
+
+
+def test_in_flight_count_reports_fresh_jobs(monkeypatch):
+    monkeypatch.setattr(service, "RATES", {})
+    service._mark_in_flight("job-aaaa1111")
+    service._mark_in_flight("job-bbbb2222")
+    assert service._in_flight_count() == 2
+
+    service._clear_in_flight("job-aaaa1111")
+    assert service._in_flight_count() == 1
+
+    service.RATES["inflight:job-cccc3333"] = time.time() - service.INFLIGHT_TTL_S - 1
+    assert service._in_flight_count() == 1

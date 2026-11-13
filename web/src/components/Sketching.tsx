@@ -68,9 +68,11 @@ const Dots = memo(function Dots({
 export default function Sketching({
   warmed,
   mode,
+  ahead,
 }: {
   warmed: boolean
   mode: Mode
+  ahead: number
 }) {
   // The timer lives here, not in App: a 4 fps tick should repaint the sketch,
   // not the composer, the stage, and every attachment thumbnail.
@@ -122,6 +124,7 @@ export default function Sketching({
     <div className="matrix-block" ref={blockRef}>
       <p className="matrix-caption">
         {label} · {elapsed.toFixed(0)}s
+        {ahead > 0 && <span className="matrix-queue"> · {ahead} ahead</span>}
       </p>
       <div className="matrix-field">
         <div

@@ -614,6 +614,11 @@ button {
   letter-spacing: -0.01em;
 }
 
+.matrix-queue {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
 .matrix-field {
   position: relative;
   display: inline-block;
